@@ -229,6 +229,7 @@ const App = {
                     <option value="耗材" ${this.state.invCat === "耗材" ? "selected" : ""}>耗材</option>
                     <option value="药品" ${this.state.invCat === "药品" ? "selected" : ""}>药品</option>
                 </select>
+                <button class="btn" onclick="App.openMovementQuery()"><i class="fas fa-stream"></i> 库存流水查询</button>
                 <div class="spacer"></div>
                 <span class="muted">共 ${DB.all("items").length} 个品类</span>
             </div>
@@ -271,16 +272,58 @@ const App = {
             </div>
             <h4 style="margin:8px 0 10px;font-size:14px"><i class="fas fa-layer-group"></i> 批次明细 ${fifo.length ? '· <span class="muted" style="font-weight:400">按 FIFO 发放顺序排列</span>' : ''}</h4>
             <div class="table-wrap"><table class="data">
-                <thead><tr><th>发放顺序</th><th>批号</th><th>生产日期</th><th>有效期</th><th>剩余</th><th>供应商</th><th>数量</th><th>货位</th><th>状态</th></tr></thead>
+                <thead><tr><th>发放顺序</th><th>批号</th><th>生产日期</th><th>有效期</th><th>剩余</th><th>供应商</th><th>数量</th><th>货位</th><th>状态</th><th>流水</th></tr></thead>
                 <tbody>${allBatches.length ? allBatches.map(b => {
                     const st = BIZ.batchStatus(b), fifoIdx = fifo.findIndex(f => f.id === b.id), sup = BIZ.getSupplier(b.supplier), days = daysToToday(b.expiryDate);
+                    const mvCount = BIZ.movementsByBatch(b.batchNo).length;
                     return `<tr ${fifoIdx === 0 ? 'style="background:#f0fdf4"' : ""}><td>${fifoIdx >= 0 ? `<span class="tag tag-green">#${fifoIdx + 1}</span>` : '<span class="muted">—</span>'}</td>
                         <td><strong>${b.batchNo}</strong></td><td>${fmtDate(b.productionDate)}</td><td>${fmtDate(b.expiryDate)}</td>
                         <td class="fw-700">${days > 0 ? days + "天" : '<span class="text-danger">已过期</span>'}</td><td>${sup ? sup.name : "—"}</td>
-                        <td><strong>${b.quantity}</strong> / ${b.initialQty}</td><td>${b.location}</td><td><span class="tag ${st.cls}">${st.label}</span></td></tr>`;
-                }).join("") : this.emptyCell("fa-box-open", "暂无库存批次", 9)}</tbody>
+                        <td><strong>${b.quantity}</strong> / ${b.initialQty}</td><td>${b.location}</td><td><span class="tag ${st.cls}">${st.label}</span></td>
+                        <td><a href="javascript:void(0)" onclick="App.showBatchTimeline('${b.batchNo}')" style="font-size:11px">查看 ${mvCount} 条 →</a></td></tr>`;
+                }).join("") : this.emptyCell("fa-box-open", "暂无库存批次", 10)}</tbody>
             </table></div>`;
             this.openModal(`${it.name} - 库存详情`, body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "lg");
+        },
+        openMovementQuery() {
+            const items = DB.all("items");
+            const body = `<p class="muted" style="margin-bottom:10px">按批号或物品查询该批次/物品的全部库存动作流水（入库、出库、盘点调整等），形成可追责的时间线。</p>
+            <div class="form-row" style="margin-bottom:14px">
+                <div class="field"><label>按批号查询</label>
+                    <input type="text" id="mq-batchno" placeholder="如：SY2025-1108A"></div>
+                <div class="field"><label>或 按物品查询</label>
+                    <select id="mq-item"><option value="">全部物品</option>${items.map(it => `<option value="${it.id}">${it.name}</option>`).join("")}</select></div>
+                <div class="field" style="align-self:flex-end"><button class="btn btn-primary" onclick="App.runMovementQuery()"><i class="fas fa-search"></i> 查询流水</button></div>
+            </div>
+            <div id="mq-result">${this.empty("fa-stream", "输入批号或选择物品后点击查询").replace(/<div[^>]*>/, "").replace(/<\/div>$/, "")}</div>`;
+            this.openModal("库存流水查询", body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "lg");
+        },
+        runMovementQuery() {
+            const batchNo = document.getElementById("mq-batchno").value.trim();
+            const itemId = document.getElementById("mq-item").value;
+            let list = [];
+            if (batchNo) list = BIZ.movementsByBatch(batchNo);
+            else if (itemId) list = BIZ.movementsByItem(itemId);
+            else { DB.all("stockMovements").forEach(m => list.push(m)); list.sort((a, b) => b.movementDate.localeCompare(a.movementDate)); list = list.slice(0, 100); }
+            const box = document.getElementById("mq-result");
+            if (!list.length) { box.innerHTML = this.empty("fa-circle-exclamation", "未找到流水记录").replace(/<div[^>]*>/, "").replace(/<\/div>$/, ""); return; }
+            box.innerHTML = `<div class="muted" style="margin-bottom:10px">共 ${list.length} 条流水记录${batchNo ? `（批号 ${batchNo}）` : itemId ? `（物品 ${BIZ.getItem(itemId).name}）` : '（最近 100 条）'}</div>
+            <div class="table-wrap"><table class="data" style="font-size:13px">
+                <thead><tr><th>日期</th><th>类型</th><th>物品</th><th>批号</th><th>方向</th><th>数量</th><th>操作人</th><th>关联单据</th><th>备注</th></tr></thead>
+                <tbody>${list.map(m => {
+                    const it = BIZ.getItem(m.itemId);
+                    const dirColor = m.direction === "IN" ? "text-success" : "text-danger";
+                    const sign = m.direction === "IN" ? "+" : "-";
+                    const typeTag = m.movementType === "入库" ? '<span class="tag tag-green">入库</span>' :
+                                   m.movementType === "出库" ? '<span class="tag tag-teal">出库</span>' :
+                                   m.movementType === "盘点调整" ? '<span class="tag tag-amber">盘点调整</span>' : `<span class="tag tag-gray">${m.movementType}</span>`;
+                    return `<tr><td>${fmtDate(m.movementDate)}</td><td>${typeTag}</td>
+                        <td>${it ? it.name : "—"}</td><td><strong>${m.batchNo}</strong></td>
+                        <td>${m.direction === "IN" ? '<span class="text-success">↑入库</span>' : '<span class="text-danger">↓出库</span>'}</td>
+                        <td class="fw-700 ${dirColor}">${sign}${m.quantity}${it ? it.unit : ""}</td>
+                        <td>${m.operator}</td><td>${m.refNo || "—"}</td><td style="max-width:260px">${m.remark || "—"}</td></tr>`;
+                }).join("")}</tbody>
+            </table></div>`;
         },
 
         /* ---------- 入库管理 ---------- */
@@ -340,7 +383,15 @@ const App = {
             if (expDate <= prodDate) return this.toast("有效期必须晚于生产日期", "error");
             const batchId = uid("B"), receiptNo = BIZ.genReceiptNo();
             DB.insert("batches", { id: batchId, itemId, batchNo, productionDate: prodDate, expiryDate: expDate, supplier, quantity: qty, initialQty: qty, inboundDate: date, price, location, inboundOperator: "张药剂师", receiptNo });
-            DB.insert("inboundRecords", { id: uid("IN"), itemId, batchId, batchNo, quantity: qty, supplier, productionDate: prodDate, expiryDate: expDate, inboundDate: date, operator: "张药剂师", price, receiptNo, checked: true });
+            const inId = uid("IN");
+            DB.insert("inboundRecords", { id: inId, itemId, batchId, batchNo, quantity: qty, supplier, productionDate: prodDate, expiryDate: expDate, inboundDate: date, operator: "张药剂师", price, receiptNo, checked: true });
+            BIZ.recordMovement({
+                movementType: "入库", movementDate: date,
+                itemId, batchId, batchNo, quantity: qty, balanceAfter: qty,
+                direction: "IN", operator: "张药剂师",
+                refType: "inbound", refId: inId, refNo: receiptNo,
+                remark: "新增入库 - 批号 " + batchNo
+            });
             const it = BIZ.getItem(itemId), d = daysToToday(expDate);
             this.toast(`入库成功：${it.name} ${qty}${it.unit}，批号 ${batchNo}（${d > 0 ? "有效期 " + d + " 天" : "已过期"}）`, "success");
             this.closeModal(); this.updateBadges(); this.navigate("inbound");
@@ -357,9 +408,18 @@ const App = {
             if (!pr) return;
             const it = BIZ.getItem(pr.itemId), batchId = uid("B"), receiptNo = BIZ.genReceiptNo();
             const prodDate = addDays(todayStr(), -300), expDate = addDays(todayStr(), 65), sup = DB.all("suppliers")[0];
-            DB.insert("batches", { id: batchId, itemId: pr.itemId, batchNo: "RC" + receiptNo.slice(-6), productionDate: prodDate, expiryDate: expDate, supplier: sup.id, quantity: pr.quantity, initialQty: pr.quantity, inboundDate: todayStr(), price: 0, location: "待上架", inboundOperator: "张药剂师", receiptNo });
-            DB.insert("inboundRecords", { id: uid("IN"), itemId: pr.itemId, batchId, batchNo: "RC" + receiptNo.slice(-6), quantity: pr.quantity, supplier: sup.id, productionDate: prodDate, expiryDate: expDate, inboundDate: todayStr(), operator: "张药剂师", price: 0, receiptNo, checked: true });
+            const batchNo = "RC" + receiptNo.slice(-6);
+            DB.insert("batches", { id: batchId, itemId: pr.itemId, batchNo, productionDate: prodDate, expiryDate: expDate, supplier: sup.id, quantity: pr.quantity, initialQty: pr.quantity, inboundDate: todayStr(), price: 0, location: "待上架", inboundOperator: "张药剂师", receiptNo });
+            const inId = uid("IN");
+            DB.insert("inboundRecords", { id: inId, itemId: pr.itemId, batchId, batchNo, quantity: pr.quantity, supplier: sup.id, productionDate: prodDate, expiryDate: expDate, inboundDate: todayStr(), operator: "张药剂师", price: 0, receiptNo, checked: true });
             DB.update("purchaseRequests", prId, { status: "已到货" });
+            BIZ.recordMovement({
+                movementType: "入库", movementDate: todayStr(),
+                itemId: pr.itemId, batchId, batchNo, quantity: pr.quantity, balanceAfter: pr.quantity,
+                direction: "IN", operator: "张药剂师",
+                refType: "inbound", refId: inId, refNo: receiptNo,
+                remark: "采购到货核对入库 - 采购单 " + prId
+            });
             this.toast(`到货核对完成：${it.name} ${pr.quantity}${it.unit} 已入库`, "success");
             this.closeModal(); this.updateBadges(); this.navigate("inbound");
         },
@@ -482,9 +542,17 @@ const App = {
             const result = BIZ.planIssue(itemId, qty, strategy);
             if (!result.ok) return this.toast(`库存不足，最多可发放 ${result.totalUse} ${BIZ.getItem(itemId).unit}（缺 ${result.shortage}）`, "error");
             const it = BIZ.getItem(itemId);
+            const outboundId = uid("OUT");
             result.plan.forEach(p => {
                 DB.update("batches", p.batchId, { quantity: p.left });
-                DB.insert("outboundRecords", { id: uid("OUT"), itemId, batchId: p.batchId, batchNo: p.batchNo, quantity: p.use, department: dept, operator, purpose: purpose || "—", patient, outboundDate: todayStr(), strategy });
+                DB.insert("outboundRecords", { id: outboundId, itemId, batchId: p.batchId, batchNo: p.batchNo, quantity: p.use, department: dept, operator, purpose: purpose || "—", patient, outboundDate: todayStr(), strategy });
+                BIZ.recordMovement({
+                    movementType: "出库", movementDate: todayStr(),
+                    itemId, batchId: p.batchId, batchNo: p.batchNo, quantity: p.use,
+                    direction: "OUT", operator,
+                    refType: "outbound", refId: outboundId, refNo: outboundId,
+                    remark: `${dept} - ${purpose || "—"}${patient !== "—" ? " - " + patient : ""} (${strategy})`
+                });
             });
             this.toast(`出库成功：${it.name} ${result.totalUse}${it.unit}（${result.label}，${result.plan.length} 个批次）`, "success");
             this.closeModal(); this.updateBadges(); this.navigate("outbound");
@@ -530,15 +598,21 @@ const App = {
                 return true;
             }).sort((a, b) => b.outbound.outboundDate.localeCompare(a.outbound.outboundDate));
             const box = document.getElementById("trace-result");
-            if (!filtered.length) { box.innerHTML = this.empty("fa-circle-exclamation", "未找到匹配的链路记录，请调整筛选条件").replace(/<div[^>]*>/, "").replace(/<\/div>$/, ""); return; }
-            box.innerHTML = `<div class="muted" style="margin-bottom:10px">查询条件：关键词「${kw || "全部"}」${dept ? ` · 科室「${dept}」` : ""}${ds || de ? ` · 日期「${ds || "不限"} ~ ${de || "不限"}」` : ""} · 共命中 <strong>${filtered.length}</strong> 条完整链路：</div>
+            if (!filtered.length) { this._lastTraceResults = []; box.innerHTML = this.empty("fa-circle-exclamation", "未找到匹配的链路记录，请调整筛选条件").replace(/<div[^>]*>/, "").replace(/<\/div>$/, ""); return; }
+            this._lastTraceResults = filtered;
+            box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <div class="muted">查询条件：关键词「${kw || "全部"}」${dept ? ` · 科室「${dept}」` : ""}${ds || de ? ` · 日期「${ds || "不限"} ~ ${de || "不限"}」` : ""} · 共命中 <strong>${filtered.length}</strong> 条完整链路</div>
+                <button class="btn btn-sm btn-ghost" onclick="App.exportTrace()"><i class="fas fa-file-export"></i> 导出 CSV（含链路信息）</button>
+            </div>
                 ${filtered.map(c => {
                     const o = c.outbound, it = c.item, sup = c.supplier, ib = c.inbound;
                     const total = ((ib && ib.quantity) || "-") + (it ? (it.unit ? " " + it.unit : "") : "");
+                    /* 该批次的盘点调整记录 */
+                    const adjustMvs = BIZ.movementsByBatch(o.batchNo).filter(m => m.movementType === "盘点调整");
                     return `<div class="card" style="margin-bottom:12px;border-color:var(--border)">
                         <div class="card-head" style="padding:10px 14px">
                             <div style="font-weight:700"><i class="fas fa-box" style="color:var(--primary)"></i> ${it ? it.name : "未知物品"} <span class="muted" style="font-weight:400;font-size:12px">（${it ? it.spec : ""}）</span>
-                                <span class="tag tag-blue" style="margin-left:8px">批次 ${o.batchNo}</span>
+                                <a href="javascript:void(0)" onclick="App.showBatchTimeline('${o.batchNo}')" style="margin-left:8px;text-decoration:none"><span class="tag tag-blue">批次 ${o.batchNo}</span></a>
                                 ${o.strategy ? `<span class="tag tag-gray" style="margin-left:4px">${o.strategy}</span>` : ""}
                             </div>
                             <span class="muted">出库 ${fmtDate(o.outboundDate)} · ${o.quantity}${it ? it.unit : ""}</span>
@@ -546,7 +620,7 @@ const App = {
                         <div class="card-body" style="padding:10px 14px">
                             <div class="timeline" style="padding-left:20px;padding-top:4px">
                                 <div class="timeline-item" style="padding-bottom:10px">
-                                    <div class="t-time">① 采购入库 ${ib ? fmtDate(ib.inboundDate) : "未知"} ${sup ? `<span class="tag tag-gray" style="margin-left:6px">${sup.name.slice(0,12)}</span>` : ""}</div>
+                                    <div class="t-time">① 采购入库 ${ib ? fmtDate(ib.inboundDate) : "未知"} ${sup ? `<span class="tag tag-gray" style="margin-left:6px">${sup.name.slice(0,12)}</span>` : ""} ${ib ? `<a href="javascript:void(0)" onclick="App.showInboundDetail('${ib.id}')" style="margin-left:6px;font-size:11px">查看入库单 →</a>` : ""}</div>
                                     <div class="t-text">
                                         <strong>供应商：</strong>${sup ? `${sup.name}${sup.license ? ` <span class="muted">(${sup.license})</span>` : ""}` : "—"}<br>
                                         <strong>入库单号：</strong>${ib ? ib.receiptNo : "—"} · <strong>入库数量：</strong>${total}<br>
@@ -554,20 +628,92 @@ const App = {
                                         <strong>入库操作：</strong>${ib ? ib.operator : "—"} · <strong>货位：</strong>${c.batch ? (c.batch.location || "—") : "—"}
                                     </div>
                                 </div>
-                                <div class="timeline-item" style="padding-bottom:0">
+                                <div class="timeline-item" style="padding-bottom:${adjustMvs.length ? '10px' : '0'}">
                                     <div class="t-time">② 发放出库 ${fmtDate(o.outboundDate)} <span class="tag tag-teal" style="margin-left:6px">${o.department}</span></div>
                                     <div class="t-text">
-                                        <strong>领用人：</strong>${o.operator} · 
-                                        <strong>发放数量：</strong><span class="fw-700 text-danger">${o.quantity}${it ? it.unit : ""}</span> · 
+                                        <strong>领用人：</strong>${o.operator} ·
+                                        <strong>发放数量：</strong><span class="fw-700 text-danger">${o.quantity}${it ? it.unit : ""}</span> ·
                                         <strong>使用用途：</strong>${o.purpose || "—"}<br>
                                         <strong>患者追溯：</strong>${o.patient && o.patient !== "—" ? `<span class="tag tag-blue"><i class="fas fa-user"></i> ${o.patient}</span>` : '<span class="muted">未关联患者</span>'}
                                     </div>
                                 </div>
+                                ${adjustMvs.length ? `<div class="timeline-item" style="padding-bottom:0">
+                                    <div class="t-time">③ 盘点调整（${adjustMvs.length} 次）</div>
+                                    <div class="t-text">
+                                        ${adjustMvs.map(m => `<div style="padding:2px 0">${fmtDate(m.movementDate)} · ${m.remark} · <span class="fw-700 ${m.direction === 'IN' ? 'text-success' : 'text-danger'}">${m.direction === 'IN' ? '+' : '-'}${m.quantity}</span> · 操作人 ${m.operator}</div>`).join("")}
+                                        <a href="javascript:void(0)" onclick="App.showBatchTimeline('${o.batchNo}')" style="font-size:11px">查看完整批次流水 →</a>
+                                    </div>
+                                </div>` : ''}
                             </div>
                         </div>
                     </div>`;
                 }).join("")}
             </div>`;
+        },
+        exportTrace() {
+            /* 取最后一次查询的缓存（存于 App._lastTraceResults） */
+            const data = this._lastTraceResults || [];
+            if (!data.length) return this.toast("没有可导出的查询结果", "warning");
+            const header = ["序号","物品","规格","批号","供应商","入库单号","入库日期","入库数量","生产日期","有效期","出库日期","出库数量","领用科室","领用人","使用用途","患者追溯","发放策略","盘点调整次数"];
+            const rows = data.map((c, i) => {
+                const o = c.outbound, it = c.item, ib = c.inbound, sup = c.supplier;
+                const adjCount = BIZ.movementsByBatch(o.batchNo).filter(m => m.movementType === "盘点调整").length;
+                return [i+1, it?it.name:"", it?it.spec:"", o.batchNo, sup?sup.name:"", ib?ib.receiptNo:"", ib?fmtDate(ib.inboundDate):"", ib?ib.quantity:"", ib?fmtDate(ib.productionDate):"", ib?fmtDate(ib.expiryDate):"", fmtDate(o.outboundDate), o.quantity, o.department, o.operator, o.purpose||"", o.patient||"", o.strategy||"", adjCount];
+            });
+            const csv = "\uFEFF" + [header, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(",")).join("\r\n");
+            const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = `追溯链路_${todayStr()}.csv`;
+            document.body.appendChild(link); link.click(); document.body.removeChild(link);
+            this.toast(`已导出 ${data.length} 条链路记录（CSV）`, "success");
+        },
+        showInboundDetail(inId) {
+            const r = DB.find("inboundRecords", x => x.id === inId);
+            if (!r) return;
+            const it = BIZ.getItem(r.itemId), sup = BIZ.getSupplier(r.supplier), b = BIZ.getBatch(r.batchId);
+            const body = `<div class="detail-list">
+                <div class="detail-item"><span class="lbl">入库单号</span><span class="val">${r.receiptNo}</span></div>
+                <div class="detail-item"><span class="lbl">物品</span><span class="val">${it?it.name:"—"}</span></div>
+                <div class="detail-item"><span class="lbl">批号</span><span class="val">${r.batchNo}</span></div>
+                <div class="detail-item"><span class="lbl">入库数量</span><span class="val">${r.quantity} ${it?it.unit:""}</span></div>
+                <div class="detail-item"><span class="lbl">供应商</span><span class="val">${sup?sup.name:"—"}</span></div>
+                <div class="detail-item"><span class="lbl">生产日期</span><span class="val">${fmtDate(r.productionDate)}</span></div>
+                <div class="detail-item"><span class="lbl">有效期</span><span class="val">${fmtDate(r.expiryDate)}</span></div>
+                <div class="detail-item"><span class="lbl">入库日期</span><span class="val">${fmtDate(r.inboundDate)}</span></div>
+                <div class="detail-item"><span class="lbl">入库操作人</span><span class="val">${r.operator}</span></div>
+                <div class="detail-item"><span class="lbl">核对状态</span><span class="val">${r.checked?'<span class="tag tag-green">已核对</span>':'<span class="tag tag-amber">待核对</span>'}</span></div>
+                <div class="detail-item"><span class="lbl">货位</span><span class="val">${b?(b.location||"—"):"—"}</span></div>
+            </div>`;
+            this.openModal(`入库单详情 - ${r.receiptNo}`, body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "md");
+        },
+        showBatchTimeline(batchNo) {
+            const list = BIZ.movementsByBatch(batchNo);
+            const b = DB.find("batches", x => x.batchNo === batchNo);
+            const it = b ? BIZ.getItem(b.itemId) : null;
+            const body = `<div class="detail-list" style="margin-bottom:14px">
+                ${b ? `<div class="detail-item"><span class="lbl">批号</span><span class="val">${b.batchNo}</span></div>` : ''}
+                ${it ? `<div class="detail-item"><span class="lbl">物品</span><span class="val">${it.name}（${it.spec}）</span></div>` : ''}
+                ${b ? `<div class="detail-item"><span class="lbl">当前库存</span><span class="val fw-700">${b.quantity} ${it?it.unit:""}</span></div>` : ''}
+                ${b ? `<div class="detail-item"><span class="lbl">有效期</span><span class="val">${fmtDate(b.expiryDate)}</span></div>` : ''}
+            </div>
+            <h4 style="margin:8px 0 10px;font-size:14px"><i class="fas fa-stream"></i> 库存流水时间线（${list.length} 条）</h4>
+            ${list.length ? `<div class="timeline" style="padding-left:20px">${list.map(m => {
+                const mIt = BIZ.getItem(m.itemId);
+                const dirColor = m.direction === "IN" ? "text-success" : "text-danger";
+                const sign = m.direction === "IN" ? "+" : "-";
+                const refLink = m.refType === "outbound" ? `<a href="javascript:void(0)" onclick="App.showInboundDetail('${m.refId}')" style="font-size:11px">${m.refNo}</a>` : m.refNo;
+                return `<div class="timeline-item" style="padding-bottom:12px">
+                    <div class="t-time">${fmtDate(m.movementDate)} <span class="tag ${m.movementType==='入库'?'tag-green':m.movementType==='出库'?'tag-teal':m.movementType==='盘点调整'?'tag-amber':'tag-gray'}" style="margin-left:6px">${m.movementType}</span></div>
+                    <div class="t-text">
+                        <strong>数量：</strong><span class="fw-700 ${dirColor}">${sign}${m.quantity}${mIt?mIt.unit:""}</span> ·
+                        <strong>操作人：</strong>${m.operator} ·
+                        <strong>关联单据：</strong>${refLink}<br>
+                        <strong>备注：</strong>${m.remark || "—"}
+                    </div>
+                </div>`;
+            }).join("")}</div>` : '<div class="muted" style="padding:20px;text-align:center">该批次暂无流水记录</div>'}`;
+            this.openModal(`批次流水 - ${batchNo}`, body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "lg");
         },
 
         /* ---------- 效期预警 ---------- */

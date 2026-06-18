@@ -61,104 +61,211 @@ App._renderColdCharts = function () {
 /* ---------- 盘点管理 ---------- */
 App.views.check = function () {
     const list = DB.all("inventoryChecks");
+    const pendingReview = list.filter(c => c.status === "待复核").length;
     document.getElementById("content").innerHTML = `
     <div class="toolbar"><button class="btn btn-primary" onclick="App.openCheckForm()"><i class="fas fa-plus"></i> 新建盘点</button>
-        <div class="spacer"></div><span class="muted">系统对比账面库存与实物，自动生成差异报告</span></div>
+        <div class="spacer"></div>
+        ${pendingReview > 0 ? `<span class="tag tag-amber" style="margin-right:10px"><i class="fas fa-clock"></i> ${pendingReview} 张待复核</span>` : ''}
+        <span class="muted">盘完生成待复核单，主管确认后才真正改库存</span></div>
     <div class="grid grid-2">${list.length ? list.map(c => this._checkCard(c)).join("") : this.empty("fa-clipboard-check", "暂无盘点记录")}</div>`;
 };
 
 App._checkCard = function (c) {
-    const totalDiff = c.items.reduce((s, i) => s + i.diff, 0);
-    const done = c.status === "已完成";
+    const totalDiff = (c.items || []).reduce((s, i) => s + (i.diff || 0), 0);
+    const statusTag = c.status === "已完成" ? '<span class="tag tag-green">已完成·已复核</span>' :
+                      c.status === "待复核" ? '<span class="tag tag-amber">待复核</span>' : '<span class="tag tag-gray">' + c.status + '</span>';
+    const reviewInfo = c.status === "已完成" && c.reviewedBy ? `
+        <div class="detail-item"><span class="lbl">复核人</span><span class="val">${c.reviewedBy}</span></div>
+        <div class="detail-item"><span class="lbl">复核时间</span><span class="val">${fmtDate(c.reviewDate)}</span></div>` : '';
+    const reviewBtn = c.status === "待复核" ?
+        `<button class="btn btn-sm btn-success" onclick="App.reviewCheck('${c.id}')"><i class="fas fa-check-double"></i> 主管复核</button>
+         <button class="btn btn-sm btn-ghost" style="margin-left:6px" onclick="App.showCheckDetail('${c.id}')">查看明细</button>` :
+        `<button class="btn btn-sm btn-ghost" onclick="App.showCheckDetail('${c.id}')"><i class="fas fa-file-alt"></i> 查看差异报告</button>`;
     return `<div class="card">
-        <div class="card-head"><h3><i class="fas fa-clipboard-check"></i> 盘点单 ${c.id}</h3><span class="tag ${done ? 'tag-green' : 'tag-amber'}">${c.status}</span></div>
+        <div class="card-head"><h3><i class="fas fa-clipboard-check"></i> 盘点单 ${c.id}</h3>${statusTag}</div>
         <div class="card-body">
             <div class="detail-list" style="margin-bottom:14px">
                 <div class="detail-item"><span class="lbl">盘点日期</span><span class="val">${fmtDate(c.checkDate)}</span></div>
-                <div class="detail-item"><span class="lbl">执行人</span><span class="val">${c.operator}</span></div>
-                <div class="detail-item"><span class="lbl">盘点物品</span><span class="val">${c.items.length} 项</span></div>
+                <div class="detail-item"><span class="lbl">盘点人</span><span class="val">${c.operator}</span></div>
+                <div class="detail-item"><span class="lbl">盘点物品</span><span class="val">${(c.items || []).length} 项</span></div>
                 <div class="detail-item"><span class="lbl">净差异</span><span class="val ${totalDiff < 0 ? 'text-danger' : totalDiff > 0 ? 'text-success' : ''}">${totalDiff > 0 ? '+' : ''}${totalDiff}</span></div>
+                ${reviewInfo}
             </div>
-            <button class="btn btn-sm btn-ghost" onclick="App.showCheckDetail('${c.id}')"><i class="fas fa-file-alt"></i> 查看差异报告</button>
+            ${reviewBtn}
         </div></div>`;
 };
 
 App.openCheckForm = function () {
     const items = DB.all("items");
-    const body = `<p class="muted" style="margin-bottom:14px">选择需要盘点的物品，录入实物数量，系统自动对比账面库存并计算差异。</p>
-        <div class="table-wrap"><table class="data"><thead><tr><th>选择</th><th>物品</th><th>账面库存</th><th>实物数量</th></tr></thead>
+    const body = `<p class="muted" style="margin-bottom:10px">选择需要盘点的物品，录入实物数量。<strong style="color:var(--danger)">实物数量必须为非负整数</strong>（空、负数、小数会被自动拦截），保存后进入待复核状态。</p>
+        <div class="table-wrap"><table class="data"><thead><tr><th>选择</th><th>物品</th><th>账面库存</th><th>实物数量</th><th>差异预览</th></tr></thead>
         <tbody>${items.map(it => { const stock = BIZ.itemStock(it.id);
             return `<tr><td><input type="checkbox" class="chk-item" data-id="${it.id}" data-stock="${stock}" data-unit="${it.unit}" checked></td>
-                <td>${it.name}（${it.spec}）</td><td>${stock} ${it.unit}</td><td><input type="number" class="phy-qty" data-id="${it.id}" value="${stock}" min="0" style="width:90px"></td></tr>`;
-        }).join("")}</tbody></table></div>`;
-    this.openModal("新建盘点", body, `<button class="btn" onclick="App.closeModal()">取消</button><button class="btn btn-primary" onclick="App.saveCheck()"><i class="fas fa-check"></i> 完成盘点</button>`, "lg");
+                <td>${it.name}（${it.spec}）</td><td>${stock} ${it.unit}</td>
+                <td><input type="number" class="phy-qty" data-id="${it.id}" value="${stock}" min="0" step="1" oninput="App.onCheckQtyInput(this)" style="width:90px"></td>
+                <td class="diff-preview" data-id="${it.id}"><span class="muted">—</span></td></tr>`;
+        }).join("")}</tbody></table></div>
+        <div id="check-validation" style="margin-top:10px"></div>`;
+    this.openModal("新建盘点", body, `<button class="btn" onclick="App.closeModal()">取消</button><button class="btn btn-primary" onclick="App.saveCheck()"><i class="fas fa-check"></i> 保存（进入待复核）</button>`, "lg");
+    /* 初始计算差异预览 */
+    document.querySelectorAll(".phy-qty").forEach(i => App.onCheckQtyInput(i));
+};
+
+/* 实时校验：空/负数/小数 */
+App.onCheckQtyInput = function (input) {
+    const id = input.dataset.id;
+    const bookQty = parseInt(document.querySelector(`.chk-item[data-id="${id}"]`).dataset.stock);
+    const raw = input.value.trim();
+    const cell = document.querySelector(`.diff-preview[data-id="${id}"]`);
+    /* 规则：非空 + 整数 + ≥0 */
+    let err = null;
+    if (raw === "") err = "不能为空";
+    else if (!/^\d+$/.test(raw)) err = "必须是非负整数";
+    else { const v = parseInt(raw); if (v < 0) err = "不能为负"; }
+    if (err) {
+        input.style.borderColor = "var(--danger)";
+        input.style.background = "var(--danger-soft)";
+        cell.innerHTML = `<span class="tag tag-red"><i class="fas fa-exclamation-triangle"></i> ${err}</span>`;
+    } else {
+        input.style.borderColor = "";
+        input.style.background = "";
+        const v = parseInt(raw), diff = v - bookQty;
+        const unit = document.querySelector(`.chk-item[data-id="${id}"]`).dataset.unit;
+        cell.innerHTML = diff === 0 ? '<span class="tag tag-green">相符</span>' :
+            diff > 0 ? `<span class="text-success fw-700">盘盈 +${diff}${unit}</span>` :
+            `<span class="text-danger fw-700">盘亏 ${diff}${unit}</span>`;
+    }
 };
 
 App.saveCheck = function () {
     const checks = document.querySelectorAll(".chk-item:checked");
     if (!checks.length) return this.toast("请至少选择一项物品", "warning");
+    /* 严格校验：所有勾选物品的实物数必须合规 */
+    const invalid = [];
     const items = [];
-    let totalDiff = 0;
     checks.forEach(chk => {
-        const id = chk.dataset.id, bookQty = parseInt(chk.dataset.stock);
-        const phy = document.querySelector(`.phy-qty[data-id="${id}"]`);
-        const physicalQty = parseInt(phy.value);
-        items.push({ itemId: id, bookQty, physicalQty, diff: physicalQty - bookQty });
-        totalDiff += physicalQty - bookQty;
+        const id = chk.dataset.id, bookQty = parseInt(chk.dataset.stock), unit = chk.dataset.unit;
+        const input = document.querySelector(`.phy-qty[data-id="${id}"]`);
+        const raw = (input.value || "").trim();
+        if (raw === "" || !/^\d+$/.test(raw)) { invalid.push(`${chk.parentElement.nextElementSibling.textContent.split('（')[0]}：实物数量 ${raw === '' ? '空' : raw} 不合规`); return; }
+        const physicalQty = parseInt(raw);
+        if (physicalQty < 0) { invalid.push(`${id}：不能为负数`); return; }
+        /* 计算调整计划（不落库） */
+        const plan = BIZ.planReconcile(id, physicalQty);
+        items.push({ itemId: id, bookQty, physicalQty, diff: physicalQty - bookQty, unit, plannedActions: plan.actions, plannedDirection: plan.direction });
     });
+    if (invalid.length) {
+        document.getElementById("check-validation").innerHTML = `<div class="tag tag-red" style="padding:8px 12px;display:block"><i class="fas fa-ban"></i> 以下 ${invalid.length} 项录入不合规，已拦截：<ul style="margin:6px 0 0 16px">${invalid.map(t => `<li>${t}</li>`).join("")}</ul></div>`;
+        return this.toast(`已拦截 ${invalid.length} 项不合规录入，请修正后再保存`, "error");
+    }
     const checkId = BIZ.genCheckNo();
-    const checkOperator = "张药剂师";
-    /* 精确校准 + 记录每个物品的处理动作 */
-    const reconciledItems = items.map(it => {
-        const r = BIZ.reconcileStock(it.itemId, it.physicalQty, { checkId, operator: checkOperator });
-        return { ...it, actions: r.actions, direction: r.direction, diff: r.diff };
-    });
+    const totalDiff = items.reduce((s, i) => s + i.diff, 0);
     DB.insert("inventoryChecks", {
-        id: checkId, checkDate: todayStr(), operator: checkOperator,
-        status: "已完成", items: reconciledItems, totalDiff,
-        reconciled: true
+        id: checkId, checkDate: todayStr(), operator: "张药剂师",
+        status: "待复核", items, totalDiff, reconciled: false,
+        createdAt: new Date().toISOString().slice(0, 16).replace("T", " ")
     });
-    const adjustedCount = reconciledItems.filter(i => i.diff !== 0).length;
-    this.toast(`盘点完成：已校准 ${adjustedCount} 项，净差异 ${totalDiff > 0 ? '+' : ''}${totalDiff}`, "success");
+    const adjustedCount = items.filter(i => i.diff !== 0).length;
+    this.toast(`盘点单 ${checkId} 已保存为「待复核」状态，含 ${items.length} 项（${adjustedCount} 项有差异），等待主管复核`, "success");
+    this.closeModal(); this.updateBadges(); this.navigate("check");
+};
+
+/* 主管复核：通过后才真正改库存 + 写流水 */
+App.reviewCheck = function (id) {
+    const c = DB.find("inventoryChecks", x => x.id === id);
+    if (!c || c.status !== "待复核") return;
+    const diffItems = (c.items || []).filter(i => i.diff !== 0);
+    const body = `<div class="detail-list" style="margin-bottom:14px">
+        <div class="detail-item"><span class="lbl">盘点单号</span><span class="val">${c.id}</span></div>
+        <div class="detail-item"><span class="lbl">盘点人</span><span class="val">${c.operator}</span></div>
+        <div class="detail-item"><span class="lbl">盘点日期</span><span class="val">${fmtDate(c.checkDate)}</span></div>
+        <div class="detail-item"><span class="lbl">待复核项</span><span class="val">${diffItems.length} 项有差异</span></div>
+    </div>
+    <div class="table-wrap"><table class="data"><thead><tr><th>物品</th><th>账面</th><th>实物</th><th>差异</th><th>计划调整去向（批次）</th></tr></thead>
+    <tbody>${(c.items || []).map(i => {
+        const it = BIZ.getItem(i.itemId);
+        const actionTxt = (i.plannedActions || []).map(a => `<div style="padding:2px 0">批号 <strong>${a.batchNo}</strong> · ${a.type} · ${a.qty}${it.unit}</div>`).join("") || '<span class="muted">无调整</span>';
+        return `<tr><td><strong>${it.name}</strong><br><span class="muted" style="font-size:11px">${it.spec}</span></td>
+            <td>${i.bookQty} ${it.unit}</td><td>${i.physicalQty} ${it.unit}</td>
+            <td class="fw-700 ${i.diff < 0 ? 'text-danger' : i.diff > 0 ? 'text-success' : ''}">${i.diff > 0 ? '+' : ''}${i.diff}</td>
+            <td style="min-width:220px">${actionTxt}</td></tr>`;
+    }).join("")}</tbody></table></div>
+    <div class="field" style="margin-top:14px"><label>复核人姓名 <span class="text-danger">*</span></label><input type="text" id="rv-reviewer" placeholder="主管姓名" value="李主管"></div>
+    <p class="muted" style="margin-top:8px;font-size:12px"><i class="fas fa-info-circle"></i> 复核通过后，系统将按上述计划真实扣减/增加批次库存，并写入库存流水，不可撤销。</p>`;
+    this.openModal("主管复核盘点单 - " + id, body, `<button class="btn" onclick="App.closeModal()">取消</button><button class="btn btn-ghost" onclick="App.rejectCheck('${id}')"><i class="fas fa-times"></i> 驳回重盘</button><button class="btn btn-success" onclick="App.approveCheck('${id}')"><i class="fas fa-check-double"></i> 确认复核通过</button>`, "lg");
+};
+
+App.approveCheck = function (id) {
+    const c = DB.find("inventoryChecks", x => x.id === id);
+    if (!c || c.status !== "待复核") return;
+    const reviewer = document.getElementById("rv-reviewer").value.trim();
+    if (!reviewer) return this.toast("请填写复核人姓名", "error");
+    /* 逐项执行真实校准 */
+    (c.items || []).forEach(i => {
+        if (i.diff === 0) return;
+        BIZ.executeReconcile(i.itemId, i.diff, i.plannedActions || [], {
+            checkId: id, operator: c.operator, reviewedBy: reviewer
+        });
+    });
+    DB.update("inventoryChecks", id, {
+        status: "已完成", reviewedBy: reviewer, reviewDate: todayStr(),
+        reconciled: true, reviewedAt: new Date().toISOString().slice(0, 16).replace("T", " ")
+    });
+    this.toast(`盘点单 ${id} 复核通过，库存已按实物数量精确校准`, "success");
+    this.closeModal(); this.updateBadges(); this.navigate("check");
+};
+
+App.rejectCheck = function (id) {
+    if (!confirm("确认驳回该盘点单？库存不会被修改，需重新盘点。")) return;
+    DB.update("inventoryChecks", id, { status: "已驳回", reconciled: false });
+    this.toast("盘点单已驳回，库存未变更", "info");
     this.closeModal(); this.updateBadges(); this.navigate("check");
 };
 
 App.showCheckDetail = function (id) {
     const c = DB.find("inventoryChecks", x => x.id === id);
     if (!c) return;
-    const totalDiff = c.items.reduce((s, i) => s + i.diff, 0);
-    /* 生成每个物品的调整动作明细行：盘盈=+、盘亏=- */
-    const actionRows = (actions) => {
-        if (!actions || !actions.length) return '<span class="muted">无调整</span>';
+    const items = c.items || [];
+    const totalDiff = items.reduce((s, i) => s + (i.diff || 0), 0);
+    /* 生成每个物品的调整动作明细行：盘盈=+、盘亏=-，字段兼容 plannedActions 和 actions */
+    const actionRows = (i) => {
+        const actions = i.plannedActions || i.actions || [];
+        if (!actions.length) return '<span class="muted">无调整</span>';
         return actions.map(a => {
             const isGain = a.type && a.type.indexOf("盘盈") === 0;
             const sign = isGain ? "+" : "-";
             const cls = isGain ? "text-success" : "text-danger";
             const textType = a.type === "盘盈增加" ? "盘盈加计" : a.type;
-            return `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span class="muted">批号 <strong>${a.batchNo}</strong> · ${textType}</span><span class="fw-700 ${cls}">${sign}${a.qty}</span></div>`;
+            const it = BIZ.getItem(i.itemId);
+            return `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span class="muted">批号 <strong>${a.batchNo}</strong> · ${textType}</span><span class="fw-700 ${cls}">${sign}${a.qty}${it ? it.unit : ""}</span></div>`;
         }).join("");
     };
+    const statusTag = c.status === "已完成" ? '<span class="tag tag-green">已完成·已复核</span>' :
+                      c.status === "待复核" ? '<span class="tag tag-amber">待复核（库存未变更）</span>' : '<span class="tag tag-gray">' + c.status + '</span>';
     const body = `
     <div class="detail-list" style="margin-bottom:16px">
         <div class="detail-item"><span class="lbl">盘点单号</span><span class="val">${c.id}</span></div>
+        <div class="detail-item"><span class="lbl">状态</span><span class="val">${statusTag}</span></div>
         <div class="detail-item"><span class="lbl">盘点日期</span><span class="val">${fmtDate(c.checkDate)}</span></div>
-        <div class="detail-item"><span class="lbl">执行人</span><span class="val">${c.operator}</span></div>
-        <div class="detail-item"><span class="lbl">盘点物品数</span><span class="val">${c.items.length} 项</span></div>
+        <div class="detail-item"><span class="lbl">盘点人</span><span class="val">${c.operator}</span></div>
+        ${c.reviewedBy ? `<div class="detail-item"><span class="lbl">复核人</span><span class="val">${c.reviewedBy}</span></div>` : ''}
+        ${c.reviewDate ? `<div class="detail-item"><span class="lbl">复核时间</span><span class="val">${fmtDate(c.reviewDate)}${c.reviewedAt ? ' ' + (c.reviewedAt.split(' ')[1] || '') : ''}</span></div>` : ''}
+        <div class="detail-item"><span class="lbl">盘点物品数</span><span class="val">${items.length} 项</span></div>
         <div class="detail-item"><span class="lbl">净差异总量</span><span class="val ${totalDiff < 0 ? 'text-danger' : totalDiff > 0 ? 'text-success' : ''}">${totalDiff > 0 ? '+' : ''}${totalDiff}</span></div>
-        ${c.reconciled ? `<div class="detail-item"><span class="lbl">库存校准</span><span class="val"><span class="tag tag-green">已按实物数量精确校准</span></span></div>` : ''}
+        ${c.reconciled ? `<div class="detail-item"><span class="lbl">库存校准</span><span class="val"><span class="tag tag-green">已按实物数量精确校准</span></span></div>` : '<div class="detail-item"><span class="lbl">库存校准</span><span class="val"><span class="tag tag-amber">待复核通过后生效</span></span></div>'}
     </div>
-    <h4 style="margin:8px 0 10px;font-size:14px"><i class="fas fa-file-lines"></i> 差异明细与校准动作报告</h4>
-    <div class="table-wrap"><table class="data"><thead><tr><th>物品</th><th>账面</th><th>实物</th><th>差异</th><th>处理动作明细</th></tr></thead>
-    <tbody>${c.items.map(i => {
+    <h4 style="margin:8px 0 10px;font-size:14px"><i class="fas fa-file-lines"></i> 差异明细与批次调整去向</h4>
+    <div class="table-wrap"><table class="data"><thead><tr><th>物品</th><th>账面</th><th>实物</th><th>差异</th><th>批次调整去向</th></tr></thead>
+    <tbody>${items.map(i => {
         const it = BIZ.getItem(i.itemId);
         const rate = i.bookQty ? ((i.diff / i.bookQty) * 100).toFixed(1) : "0.0";
         return `<tr><td><strong>${it.name}</strong><br><span class="muted" style="font-size:11px">${it.spec}</span></td>
             <td>${i.bookQty} ${it.unit}</td><td>${i.physicalQty} ${it.unit}</td>
             <td class="fw-700 ${i.diff < 0 ? 'text-danger' : i.diff > 0 ? 'text-success' : ''}">${i.diff > 0 ? '+' : ''}${i.diff}（${rate}%）</td>
-            <td style="min-width:200px">${i.diff === 0 ? '<span class="muted">账实相符</span>' : actionRows(i.actions)}</td></tr>`;
+            <td style="min-width:220px">${i.diff === 0 ? '<span class="muted">账实相符</span>' : actionRows(i)}</td></tr>`;
     }).join("")}</tbody></table></div>
-    ${c.reconciled ? `<p class="muted" style="margin-top:12px;font-size:12px"><i class="fas fa-info-circle"></i> 处理规则：盘亏从近效期批次依次扣减；盘盈优先加入最早入库批次，不足时新建"盘点调整"批次。所有调整已写入出库记录表，可在追溯中按批次号查找。</p>` : ''}`;
-    this.openModal(`盘点差异报告 - ${c.id}`, body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "lg");
+    ${c.reconciled ? `<p class="muted" style="margin-top:12px;font-size:12px"><i class="fas fa-info-circle"></i> 处理规则：盘亏从近效期批次依次扣减；盘盈优先加入最早入库批次，不足时新建"盘点调整"批次。所有调整已写入库存流水，可在「追溯查询」按批次号查看完整时间线。</p>` : '<p class="muted" style="margin-top:12px;font-size:12px"><i class="fas fa-info-circle"></i> 当前盘点单待主管复核，库存尚未变更。复核通过后才会真正扣减/增加批次库存。</p>'}`;
+    this.openModal(`盘点详情 - ${c.id}`, body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "lg");
 };
 
 /* ---------- 趋势分析 ---------- */

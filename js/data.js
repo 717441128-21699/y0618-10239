@@ -173,10 +173,11 @@ function seedData() {
     const inventoryChecks = [
         {
             id: "CHK-001", checkDate: addDays(TODAY, -7), operator: "张药剂师", status: "已完成",
+            reviewedBy: "李主管", reviewDate: addDays(TODAY, -6), reconciled: true,
             items: [
-                { itemId: "ITM-01", bookQty: 380, physicalQty: 375, diff: -5 },
-                { itemId: "ITM-07", bookQty: 3400, physicalQty: 3400, diff: 0 },
-                { itemId: "ITM-02", bookQty: 370, physicalQty: 365, diff: -5 },
+                { itemId: "ITM-01", bookQty: 380, physicalQty: 375, diff: -5, actions: [{ batchId: "B-002", batchNo: "SY2025-0312B", qty: 5, type: "盘亏扣减" }] },
+                { itemId: "ITM-07", bookQty: 3400, physicalQty: 3400, diff: 0, actions: [] },
+                { itemId: "ITM-02", bookQty: 370, physicalQty: 365, diff: -5, actions: [{ batchId: "B-004", batchNo: "IV2025-1003", qty: 5, type: "盘亏扣减" }] },
             ]
         },
         {
@@ -189,7 +190,48 @@ function seedData() {
         },
     ];
 
-    return { suppliers, items, batches, inboundRecords, outboundRecords, purchaseRequests, tempLogs, inventoryChecks };
+    /* ---------- 库存流水（统一记录入库/出库/盘点/报废等所有动作）---------- */
+    /* 从现有 batches/inbound/outbound 反推初始流水，让历史可追溯 */
+    const stockMovements = [];
+    /* 入库流水 */
+    inboundRecords.forEach(r => {
+        stockMovements.push({
+            id: uid("MV"), movementId: r.id.replace("IN", "MV"), movementType: "入库", movementDate: r.inboundDate,
+            itemId: r.itemId, batchId: r.batchId, batchNo: r.batchNo, quantity: r.quantity, balanceAfter: r.quantity,
+            operator: r.operator, refType: "inbound", refId: r.id, refNo: r.receiptNo,
+            remark: "采购入库 - " + (r.checked ? "已核对" : "待核对"), direction: "IN"
+        });
+    });
+    /* 出库流水（保持与出库记录对齐） */
+    outboundRecords.forEach(o => {
+        const it = items.find(i => i.id === o.itemId);
+        stockMovements.push({
+            id: uid("MV"), movementId: o.id.replace("OUT", "MV"), movementType: "出库", movementDate: o.outboundDate,
+            itemId: o.itemId, batchId: o.batchId, batchNo: o.batchNo, quantity: o.quantity,
+            operator: o.operator, refType: "outbound", refId: o.id, refNo: o.batchNo,
+            remark: o.purpose + (o.patient && o.patient !== "—" ? " - " + o.patient : "") + (o.strategy ? " (" + o.strategy + ")" : ""), direction: "OUT"
+        });
+    });
+    /* 历史盘点调整流水（CHK-001 已完成，每条 action 一条流水） */
+    inventoryChecks.filter(c => c.status === "已完成" && c.items).forEach(c => {
+        c.items.forEach(it => {
+            if (!it.actions) return;
+            it.actions.forEach(a => {
+                stockMovements.push({
+                    id: uid("MV"), movementId: c.id.replace("CHK", "MV") + "-" + a.batchNo, movementType: "盘点调整",
+                    movementDate: c.reviewDate || c.checkDate,
+                    itemId: it.itemId, batchId: a.batchId, batchNo: a.batchNo,
+                    quantity: a.qty, operator: c.reviewedBy || c.operator,
+                    refType: "inventoryCheck", refId: c.id, refNo: c.id,
+                    remark: (a.type === "盘亏扣减" ? "盘亏" : "盘盈") + "调整 - 由盘点单 " + c.id + " 触发",
+                    direction: a.type === "盘亏扣减" ? "OUT" : "IN",
+                    extra: { checkActionType: a.type }
+                });
+            });
+        });
+    });
+
+    return { suppliers, items, batches, inboundRecords, outboundRecords, purchaseRequests, tempLogs, inventoryChecks, stockMovements };
 }
 
 /* ========================================================================
@@ -342,50 +384,93 @@ const BIZ = {
             };
         }).filter(x => x.suggestQty > 0).sort((a, b) => b.shortage - a.shortage);
     },
-    /* 盘点校准：按实物数量调整批次库存，优先从 FEFO 首个批次做增减 */
-    reconcileStock(itemId, physicalQty, options = {}) {
+    /* 盘点校准计划：仅计算调整动作，不修改库存（待主管复核后才落库） */
+    planReconcile(itemId, physicalQty) {
         const current = this.itemStock(itemId);
         const diff = physicalQty - current;
-        if (diff === 0) return { diff: 0, actions: [] };
+        if (diff === 0) return { diff: 0, actions: [], direction: null };
         const actions = [];
         let remain = Math.abs(diff);
-        const dir = diff > 0 ? "IN" : "OUT"; // IN=盘盈入库, OUT=盘亏出库
-        /* 盘亏：从近效期批次依次扣减 */
+        const dir = diff > 0 ? "IN" : "OUT";
         if (dir === "OUT") {
             const batches = this.sortFEFO(itemId);
             for (const b of batches) {
                 if (remain <= 0) break;
                 const use = Math.min(b.quantity, remain);
-                DB.update("batches", b.id, { quantity: b.quantity - use });
                 actions.push({ batchId: b.id, batchNo: b.batchNo, qty: use, type: "盘亏扣减" });
                 remain -= use;
             }
         } else {
-            /* 盘盈：加到最老的入库批次（FIFO 头端），若没有有效批次则新建一个虚拟盘点批次 */
             const batches = this.sortFIFO(itemId);
             if (batches.length) {
-                DB.update("batches", batches[0].id, { quantity: batches[0].quantity + remain });
                 actions.push({ batchId: batches[0].id, batchNo: batches[0].batchNo, qty: remain, type: "盘盈增加" });
             } else {
-                const newBatch = {
-                    id: uid("B"), itemId, batchNo: "ADJ" + todayStr().replace(/-/g, ""),
-                    productionDate: todayStr(), expiryDate: addDays(todayStr(), 365),
-                    supplier: (DB.all("suppliers")[0] || {}).id || "", quantity: remain, initialQty: remain,
-                    inboundDate: todayStr(), price: 0, location: "盘点补入", inboundOperator: "系统校准",
-                    receiptNo: "ADJ-" + todayStr().replace(/-/g, "")
-                };
-                DB.insert("batches", newBatch);
-                actions.push({ batchId: newBatch.id, batchNo: newBatch.batchNo, qty: remain, type: "盘盈新增批次" });
+                actions.push({ batchId: null, batchNo: "ADJ" + todayStr().replace(/-/g, ""), qty: remain, type: "盘盈新增批次" });
             }
         }
-        /* 留下盘点调整记录，供追溯 */
-        DB.insert("outboundRecords", {
-            id: uid("OUT"), itemId, batchId: "—", batchNo: "盘点调整",
-            quantity: Math.abs(diff), department: "药剂科", operator: options.operator || "张药剂师",
-            purpose: dir === "OUT" ? "盘亏调整" : "盘盈调整", patient: "—", outboundDate: todayStr(),
-            extra: { reconcile: true, direction: dir, checkId: options.checkId || null }
-        });
         return { diff, direction: dir, actions };
+    },
+    /* 真正执行盘点校准（复核通过后调用）：改批次库存 + 写库存流水 */
+    executeReconcile(itemId, diff, actions, options = {}) {
+        if (diff === 0 || !actions.length) return { applied: false, reason: "无差异" };
+        const dir = diff > 0 ? "IN" : "OUT";
+        actions.forEach(a => {
+            if (dir === "OUT") {
+                const b = this.getBatch(a.batchId);
+                if (b) DB.update("batches", a.batchId, { quantity: b.quantity - a.qty });
+            } else {
+                if (a.type === "盘盈新增批次") {
+                    const newBatch = {
+                        id: uid("B"), itemId, batchNo: a.batchNo,
+                        productionDate: todayStr(), expiryDate: addDays(todayStr(), 365),
+                        supplier: (DB.all("suppliers")[0] || {}).id || "", quantity: a.qty, initialQty: a.qty,
+                        inboundDate: todayStr(), price: 0, location: "盘点补入", inboundOperator: options.operator || "系统校准",
+                        receiptNo: "ADJ-" + todayStr().replace(/-/g, "")
+                    };
+                    DB.insert("batches", newBatch);
+                    a.batchId = newBatch.id;
+                } else {
+                    const b = this.getBatch(a.batchId);
+                    if (b) DB.update("batches", a.batchId, { quantity: b.quantity + a.qty });
+                }
+            }
+            /* 每个动作写一条流水 */
+            this.recordMovement({
+                movementType: "盘点调整", itemId, batchId: a.batchId, batchNo: a.batchNo,
+                quantity: a.qty, direction: dir, operator: options.reviewedBy || options.operator || "系统",
+                refType: "inventoryCheck", refId: options.checkId || "", refNo: options.checkId || "",
+                remark: (dir === "OUT" ? "盘亏" : "盘盈") + "调整 - 由盘点单 " + (options.checkId || "") + " 复核后执行",
+                extra: { checkActionType: a.type }
+            });
+        });
+        return { applied: true, direction: dir };
+    },
+    /* 通用：记录一条库存流水 */
+    recordMovement(data) {
+        const mv = {
+            id: uid("MV"),
+            movementId: data.movementId || ("MV-" + Date.now() + "-" + Math.floor(Math.random() * 1000)),
+            movementType: data.movementType || "其他",
+            movementDate: data.movementDate || todayStr(),
+            itemId: data.itemId, batchId: data.batchId, batchNo: data.batchNo || "",
+            quantity: data.quantity, balanceAfter: data.balanceAfter || null,
+            operator: data.operator || "—",
+            refType: data.refType || "", refId: data.refId || "", refNo: data.refNo || "",
+            remark: data.remark || "", direction: data.direction || "",
+            extra: data.extra || null
+        };
+        DB.insert("stockMovements", mv);
+        return mv;
+    },
+    /* 按批号查询流水时间线 */
+    movementsByBatch(batchNo) {
+        return DB.filter("stockMovements", m => m.batchNo === batchNo)
+            .sort((a, b) => b.movementDate.localeCompare(a.movementDate));
+    },
+    /* 按物品查询流水 */
+    movementsByItem(itemId) {
+        return DB.filter("stockMovements", m => m.itemId === itemId)
+            .sort((a, b) => b.movementDate.localeCompare(a.movementDate));
     },
     /* 效期状态：expired / critical(30天) / warning(90天) / normal */
     batchStatus(batch) {
