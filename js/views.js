@@ -127,13 +127,15 @@ App.showCheckDetail = function (id) {
     const c = DB.find("inventoryChecks", x => x.id === id);
     if (!c) return;
     const totalDiff = c.items.reduce((s, i) => s + i.diff, 0);
-    /* 生成每个物品的调整动作明细行 */
+    /* 生成每个物品的调整动作明细行：盘盈=+、盘亏=- */
     const actionRows = (actions) => {
         if (!actions || !actions.length) return '<span class="muted">无调整</span>';
         return actions.map(a => {
-            const sign = a.type === "盘盈加计" || a.type === "盘盈新增" ? "+" : "-";
-            const cls = a.type.startsWith("盘盈") ? "text-success" : "text-danger";
-            return `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span class="muted">批号 <strong>${a.batchNo}</strong> · ${a.type}</span><span class="fw-700 ${cls}">${sign}${a.qty}</span></div>`;
+            const isGain = a.type && a.type.indexOf("盘盈") === 0;
+            const sign = isGain ? "+" : "-";
+            const cls = isGain ? "text-success" : "text-danger";
+            const textType = a.type === "盘盈增加" ? "盘盈加计" : a.type;
+            return `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span class="muted">批号 <strong>${a.batchNo}</strong> · ${textType}</span><span class="fw-700 ${cls}">${sign}${a.qty}</span></div>`;
         }).join("");
     };
     const body = `

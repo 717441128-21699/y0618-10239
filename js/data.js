@@ -291,21 +291,24 @@ const BIZ = {
             plan, strategy: strategy, label: strategy === "FEFO" ? "近效期优先(FEFO)" : "先进先出(FIFO)"
         };
     },
-    /* 完整链路追溯：按关键词搜索出库，再附带每笔的入库详情、供应商、领用人等 */
+    /* 完整链路追溯：支持多维搜索（关键词为空时返回全部，让外层日期/科室筛选生效） */
     traceChain(keyword) {
         const kw = (keyword || "").trim().toLowerCase();
-        if (!kw) return [];
-        const matches = DB.all("outboundRecords").filter(o => {
+        const all = DB.all("outboundRecords");
+        const matches = kw ? all.filter(o => {
             const it = this.getItem(o.itemId);
             const patient = (o.patient || "").toLowerCase();
             const batchNo = (o.batchNo || "").toLowerCase();
             const dept = (o.department || "").toLowerCase();
             const itemName = (it ? it.name : "").toLowerCase();
-            return patient.includes(kw) || batchNo.includes(kw) || dept.includes(kw) || itemName.includes(kw);
-        });
+            const purpose = (o.purpose || "").toLowerCase();
+            const operator = (o.operator || "").toLowerCase();
+            return patient.includes(kw) || batchNo.includes(kw) || dept.includes(kw) || itemName.includes(kw) || purpose.includes(kw) || operator.includes(kw);
+        }) : all;
         return matches.map(o => {
             const it = this.getItem(o.itemId);
-            const inbound = DB.find("inboundRecords", r => r.batchId === o.batchId);
+            const inbound = DB.find("inboundRecords", r => r.batchId === o.batchId)
+                || DB.all("inboundRecords").find(r => r.batchNo === o.batchNo && r.itemId === o.itemId);
             const sup = inbound ? this.getSupplier(inbound.supplier) : null;
             const batch = this.getBatch(o.batchId);
             return {

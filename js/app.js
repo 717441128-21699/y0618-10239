@@ -520,21 +520,18 @@ const App = {
             const dept = document.getElementById("trace-dept").value;
             const ds = document.getElementById("trace-date-start").value;
             const de = document.getElementById("trace-date-end").value;
-            if (!kw && !dept && !ds && !de) return this.toast("请至少填写一项查询条件", "warning");
-            const chains = BIZ.traceChain(kw || "（全匹配）");
-            /* 应用额外筛选 */
+            const chains = BIZ.traceChain(kw);
+            /* 应用额外筛选：科室 + 日期 */
             const filtered = chains.filter(c => {
                 const o = c.outbound;
                 if (dept && o.department !== dept) return false;
                 if (ds && o.outboundDate < ds) return false;
                 if (de && o.outboundDate > de) return false;
-                /* 如果用户填了关键词，则用 traceChain 的内部匹配 */
-                if (kw) return true;
                 return true;
             }).sort((a, b) => b.outbound.outboundDate.localeCompare(a.outbound.outboundDate));
             const box = document.getElementById("trace-result");
-            if (!filtered.length) { box.innerHTML = this.empty("fa-circle-exclamation", "未找到匹配的链路记录").replace(/<div[^>]*>/, "").replace(/<\/div>$/, ""); return; }
-            box.innerHTML = `<div class="muted" style="margin-bottom:10px">共找到 <strong>${filtered.length}</strong> 条完整链路记录：</div>
+            if (!filtered.length) { box.innerHTML = this.empty("fa-circle-exclamation", "未找到匹配的链路记录，请调整筛选条件").replace(/<div[^>]*>/, "").replace(/<\/div>$/, ""); return; }
+            box.innerHTML = `<div class="muted" style="margin-bottom:10px">查询条件：关键词「${kw || "全部"}」${dept ? ` · 科室「${dept}」` : ""}${ds || de ? ` · 日期「${ds || "不限"} ~ ${de || "不限"}」` : ""} · 共命中 <strong>${filtered.length}</strong> 条完整链路：</div>
                 ${filtered.map(c => {
                     const o = c.outbound, it = c.item, sup = c.supplier, ib = c.inbound;
                     const total = ((ib && ib.quantity) || "-") + (it ? (it.unit ? " " + it.unit : "") : "");
@@ -549,20 +546,19 @@ const App = {
                         <div class="card-body" style="padding:10px 14px">
                             <div class="timeline" style="padding-left:20px;padding-top:4px">
                                 <div class="timeline-item" style="padding-bottom:10px">
-                                    <div class="t-time">① 采购入库 ${ib ? fmtDate(ib.inboundDate) : "未知"}</div>
+                                    <div class="t-time">① 采购入库 ${ib ? fmtDate(ib.inboundDate) : "未知"} ${sup ? `<span class="tag tag-gray" style="margin-left:6px">${sup.name.slice(0,12)}</span>` : ""}</div>
                                     <div class="t-text">
-                                        <strong>供应商：</strong>${sup ? sup.name : "—"}${sup ? ` <span class="muted">(${sup.license})</span>` : ""}<br>
+                                        <strong>供应商：</strong>${sup ? `${sup.name}${sup.license ? ` <span class="muted">(${sup.license})</span>` : ""}` : "—"}<br>
                                         <strong>入库单号：</strong>${ib ? ib.receiptNo : "—"} · <strong>入库数量：</strong>${total}<br>
-                                        <strong>生产/有效期：</strong>${ib ? fmtDate(ib.productionDate) : "—"} ~ ${ib ? fmtDate(ib.expiryDate) : "—"}<br>
-                                        <strong>入库操作：</strong>${ib ? ib.operator : "—"}${ib ? (ib.checked ? ' · <span class="tag tag-green" style="margin-left:4px">已核对</span>' : '') : ''}
+                                        <strong>生产/有效期：</strong>${ib ? fmtDate(ib.productionDate) : "—"} ~ ${ib ? fmtDate(ib.expiryDate) : "—"}${ib && ib.checked ? ' · <span class="tag tag-green" style="margin-left:4px">已核对</span>' : ''}<br>
+                                        <strong>入库操作：</strong>${ib ? ib.operator : "—"} · <strong>货位：</strong>${c.batch ? (c.batch.location || "—") : "—"}
                                     </div>
                                 </div>
                                 <div class="timeline-item" style="padding-bottom:0">
-                                    <div class="t-time">② 发放出库 ${fmtDate(o.outboundDate)}</div>
+                                    <div class="t-time">② 发放出库 ${fmtDate(o.outboundDate)} <span class="tag tag-teal" style="margin-left:6px">${o.department}</span></div>
                                     <div class="t-text">
-                                        <strong>领用科室：</strong><span class="tag tag-teal">${o.department}</span>
-                                        <strong style="margin-left:12px">领用人：</strong>${o.operator}
-                                        <strong style="margin-left:12px">发放数量：</strong><span class="fw-700 text-danger">${o.quantity}${it ? it.unit : ""}</span><br>
+                                        <strong>领用人：</strong>${o.operator} · 
+                                        <strong>发放数量：</strong><span class="fw-700 text-danger">${o.quantity}${it ? it.unit : ""}</span> · 
                                         <strong>使用用途：</strong>${o.purpose || "—"}<br>
                                         <strong>患者追溯：</strong>${o.patient && o.patient !== "—" ? `<span class="tag tag-blue"><i class="fas fa-user"></i> ${o.patient}</span>` : '<span class="muted">未关联患者</span>'}
                                     </div>
