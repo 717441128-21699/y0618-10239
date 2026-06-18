@@ -256,14 +256,133 @@ const BIZ = {
     validBatches(itemId) {
         return DB.filter("batches", b => b.itemId === itemId && b.quantity > 0 && daysToToday(b.expiryDate) > 0);
     },
-    /* 先进先出(FIFO)发放排序：优先消耗近效期批次(FEFO)避免过期浪费，
-       效期相同则按入库日期先入先出 */
-    fifoBatches(itemId) {
+    /* FIFO：纯先进先出 — 按入库日期升序，同日按效期升序 */
+    sortFIFO(itemId) {
+        return this.validBatches(itemId).sort((a, b) => {
+            const dd = a.inboundDate.localeCompare(b.inboundDate);
+            if (dd !== 0) return dd;
+            return a.expiryDate.localeCompare(b.expiryDate);
+        });
+    },
+    /* FEFO：近效期优先（First Expired First Out）— 按效期升序，同日按入库日期升序 */
+    sortFEFO(itemId) {
         return this.validBatches(itemId).sort((a, b) => {
             const ed = a.expiryDate.localeCompare(b.expiryDate);
             if (ed !== 0) return ed;
             return a.inboundDate.localeCompare(b.inboundDate);
         });
+    },
+    /* 通用发放排序：支持 strategy="FIFO" | "FEFO"，默认 FIFO */
+    fifoBatches(itemId, strategy = "FIFO") {
+        return strategy === "FEFO" ? this.sortFEFO(itemId) : this.sortFIFO(itemId);
+    },
+    /* 计算发放计划：按策略扣减指定数量，返回 {ok, plan:[{batchId, batchNo, use, left}], shortage, totalUse} */
+    planIssue(itemId, qty, strategy = "FIFO") {
+        const batches = this.fifoBatches(itemId, strategy);
+        let remain = qty, plan = [];
+        for (const b of batches) {
+            if (remain <= 0) break;
+            const use = Math.min(b.quantity, remain);
+            plan.push({ batchId: b.id, batchNo: b.batchNo, productionDate: b.productionDate, expiryDate: b.expiryDate, supplier: b.supplier, inboundDate: b.inboundDate, location: b.location, use, left: b.quantity - use });
+            remain -= use;
+        }
+        return {
+            ok: remain <= 0, shortage: remain, totalUse: qty - remain,
+            plan, strategy: strategy, label: strategy === "FEFO" ? "近效期优先(FEFO)" : "先进先出(FIFO)"
+        };
+    },
+    /* 完整链路追溯：按关键词搜索出库，再附带每笔的入库详情、供应商、领用人等 */
+    traceChain(keyword) {
+        const kw = (keyword || "").trim().toLowerCase();
+        if (!kw) return [];
+        const matches = DB.all("outboundRecords").filter(o => {
+            const it = this.getItem(o.itemId);
+            const patient = (o.patient || "").toLowerCase();
+            const batchNo = (o.batchNo || "").toLowerCase();
+            const dept = (o.department || "").toLowerCase();
+            const itemName = (it ? it.name : "").toLowerCase();
+            return patient.includes(kw) || batchNo.includes(kw) || dept.includes(kw) || itemName.includes(kw);
+        });
+        return matches.map(o => {
+            const it = this.getItem(o.itemId);
+            const inbound = DB.find("inboundRecords", r => r.batchId === o.batchId);
+            const sup = inbound ? this.getSupplier(inbound.supplier) : null;
+            const batch = this.getBatch(o.batchId);
+            return {
+                outbound: o, item: it, inbound: inbound || null,
+                supplier: sup || null, batch: batch || null,
+            };
+        });
+    },
+    /* 采购建议汇总：基于低库存 + 已存在的待审批采购单，避免重复，给出合并后的建议 */
+    purchaseSuggestion() {
+        const low = this.lowStockItems();
+        const pending = {};
+        DB.filter("purchaseRequests", p => p.status === "待审批").forEach(p => {
+            pending[p.itemId] = (pending[p.itemId] || 0) + p.quantity;
+        });
+        return low.map(x => {
+            const usage30 = this.itemUsage(x.item.id, 30);
+            const daily = usage30 / 30;
+            /* 建议采购量 = 60 天预计用量 + 安全库存 - 当前库存 - 已在途 */
+            const target = Math.round(Math.max(daily, 0) * 60 + x.item.safetyStock);
+            const onHand = x.stock + (pending[x.item.id] || 0);
+            const suggestQty = Math.max(0, target - onHand);
+            const shortage = x.short + (pending[x.item.id] ? 0 : 0);
+            return {
+                item: x.item, currentStock: x.stock,
+                safetyStock: x.item.safetyStock, shortage,
+                usage30, dailyAvg: +daily.toFixed(2),
+                pendingQty: pending[x.item.id] || 0,
+                suggestQty: suggestQty || Math.max(x.item.safetyStock, x.short * 2),
+                selected: true
+            };
+        }).filter(x => x.suggestQty > 0).sort((a, b) => b.shortage - a.shortage);
+    },
+    /* 盘点校准：按实物数量调整批次库存，优先从 FEFO 首个批次做增减 */
+    reconcileStock(itemId, physicalQty, options = {}) {
+        const current = this.itemStock(itemId);
+        const diff = physicalQty - current;
+        if (diff === 0) return { diff: 0, actions: [] };
+        const actions = [];
+        let remain = Math.abs(diff);
+        const dir = diff > 0 ? "IN" : "OUT"; // IN=盘盈入库, OUT=盘亏出库
+        /* 盘亏：从近效期批次依次扣减 */
+        if (dir === "OUT") {
+            const batches = this.sortFEFO(itemId);
+            for (const b of batches) {
+                if (remain <= 0) break;
+                const use = Math.min(b.quantity, remain);
+                DB.update("batches", b.id, { quantity: b.quantity - use });
+                actions.push({ batchId: b.id, batchNo: b.batchNo, qty: use, type: "盘亏扣减" });
+                remain -= use;
+            }
+        } else {
+            /* 盘盈：加到最老的入库批次（FIFO 头端），若没有有效批次则新建一个虚拟盘点批次 */
+            const batches = this.sortFIFO(itemId);
+            if (batches.length) {
+                DB.update("batches", batches[0].id, { quantity: batches[0].quantity + remain });
+                actions.push({ batchId: batches[0].id, batchNo: batches[0].batchNo, qty: remain, type: "盘盈增加" });
+            } else {
+                const newBatch = {
+                    id: uid("B"), itemId, batchNo: "ADJ" + todayStr().replace(/-/g, ""),
+                    productionDate: todayStr(), expiryDate: addDays(todayStr(), 365),
+                    supplier: (DB.all("suppliers")[0] || {}).id || "", quantity: remain, initialQty: remain,
+                    inboundDate: todayStr(), price: 0, location: "盘点补入", inboundOperator: "系统校准",
+                    receiptNo: "ADJ-" + todayStr().replace(/-/g, "")
+                };
+                DB.insert("batches", newBatch);
+                actions.push({ batchId: newBatch.id, batchNo: newBatch.batchNo, qty: remain, type: "盘盈新增批次" });
+            }
+        }
+        /* 留下盘点调整记录，供追溯 */
+        DB.insert("outboundRecords", {
+            id: uid("OUT"), itemId, batchId: "—", batchNo: "盘点调整",
+            quantity: Math.abs(diff), department: "药剂科", operator: options.operator || "张药剂师",
+            purpose: dir === "OUT" ? "盘亏调整" : "盘盈调整", patient: "—", outboundDate: todayStr(),
+            extra: { reconcile: true, direction: dir, checkId: options.checkId || null }
+        });
+        return { diff, direction: dir, actions };
     },
     /* 效期状态：expired / critical(30天) / warning(90天) / normal */
     batchStatus(batch) {

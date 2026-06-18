@@ -392,6 +392,20 @@ const App = {
                     <select id="ob-item" onchange="App.onOutboundItemChange()"><option value="">请选择物品</option>${items.map(it => `<option value="${it.id}">${it.name}（${it.spec}）- 库存 ${BIZ.itemStock(it.id)}${it.unit}</option>`).join("")}</select></div>
                 <div class="field"><label>出库数量 <span class="text-danger">*</span></label><input type="number" id="ob-qty" min="1" value="1" oninput="App.onOutboundItemChange()"></div>
             </div>
+            <div class="form-row">
+                <div class="field"><label>发放策略 <span class="text-danger">*</span>  <span class="hint">默认先进先出，药品建议切换近效期优先</span></label>
+                    <div style="display:flex;gap:10px;margin-top:4px">
+                        <label style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px" class="strategy-label strategy-active" data-strategy="FIFO">
+                            <input type="radio" name="ob-strategy" value="FIFO" checked onchange="App.setOutboundStrategy('FIFO')">
+                            <div><div style="font-weight:700">先进先出 (FIFO)</div><span class="muted" style="font-size:11px">按入库顺序发放，适合普通耗材</span></div>
+                        </label>
+                        <label style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px" class="strategy-label" data-strategy="FEFO">
+                            <input type="radio" name="ob-strategy" value="FEFO" onchange="App.setOutboundStrategy('FEFO')">
+                            <div><div style="font-weight:700">近效期优先 (FEFO)</div><span class="muted" style="font-size:11px">优先消耗近效期批次，避免过期浪费</span></div>
+                        </label>
+                    </div>
+                </div>
+            </div>
             <div id="ob-fifo-info" style="margin-bottom:14px"></div>
             <div class="form-row">
                 <div class="field"><label>领用科室 <span class="text-danger">*</span></label><select id="ob-dept"><option>手术室</option><option>急诊科</option><option>心内科</option><option>普外科</option><option>骨科</option><option>ICU</option><option>儿科</option><option>其他</option></select></div>
@@ -402,6 +416,17 @@ const App = {
                 <div class="field"><label>患者追溯（姓名/住院号）</label><input type="text" id="ob-patient" placeholder="如：张三(住院号:102391)"></div>
             </div>`;
             this.openModal("出库领用 - 扫码发放", body, `<button class="btn" onclick="App.closeModal()">取消</button><button class="btn btn-primary" onclick="App.saveOutbound()"><i class="fas fa-check"></i> 确认出库</button>`, "lg");
+            /* 策略高亮样式 */
+            const style = document.createElement("style");
+            style.id = "ob-style";
+            style.textContent = `.strategy-active{border-color:var(--primary)!important;background:var(--primary-soft);}`;
+            if (!document.getElementById("ob-style")) document.head.appendChild(style);
+        },
+        setOutboundStrategy(strategy) {
+            document.querySelectorAll(".strategy-label").forEach(el => {
+                el.classList.toggle("strategy-active", el.dataset.strategy === strategy);
+            });
+            this.onOutboundItemChange();
         },
         simulateScan() {
             const items = DB.all("items").filter(it => BIZ.validBatches(it.id).length > 0);
@@ -413,35 +438,55 @@ const App = {
         },
         onOutboundItemChange() {
             const itemId = document.getElementById("ob-item").value, qty = parseInt(document.getElementById("ob-qty").value) || 0;
+            const strategy = (document.querySelector('input[name="ob-strategy"]:checked') || {}).value || "FIFO";
             const info = document.getElementById("ob-fifo-info");
             if (!itemId) { info.innerHTML = ""; return; }
-            const fifo = BIZ.fifoBatches(itemId);
-            if (!fifo.length) { info.innerHTML = `<span class="tag tag-red">该物品无可用库存</span>`; return; }
-            let remain = qty, plan = [];
-            for (const b of fifo) { if (remain <= 0) break; const use = Math.min(b.quantity, remain); plan.push({ b, use }); remain -= use; }
-            const enough = remain <= 0, it = BIZ.getItem(itemId);
-            info.innerHTML = `<div class="card" style="border-color:var(--primary);background:var(--primary-soft)"><div class="card-body" style="padding:12px 14px">
-                <div style="font-weight:700;margin-bottom:6px"><i class="fas fa-sort-amount-down-alt"></i> FIFO 发放计划 ${enough ? '' : '· <span class="text-danger">库存不足</span>'}</div>
-                ${plan.map(p => { const st = BIZ.batchStatus(p.b), sup = BIZ.getSupplier(p.b.supplier);
-                    return `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>批号 <strong>${p.b.batchNo}</strong> · ${sup ? sup.name.slice(0, 8) : "—"} · 效期 ${fmtDate(p.b.expiryDate)} <span class="tag ${st.cls}" style="margin-left:4px">${st.label}</span></span><span class="fw-700">消耗 ${p.use} ${it.unit}</span></div>`; }).join("")}
-            </div></div>`;
+            const it = BIZ.getItem(itemId);
+            const result = BIZ.planIssue(itemId, qty, strategy);
+            if (!result.plan.length) { info.innerHTML = `<span class="tag tag-red">该物品无可用库存</span>`; return; }
+            const headerColor = result.ok ? "var(--primary)" : "var(--danger)";
+            const headerBg = result.ok ? "var(--primary-soft)" : "var(--danger-soft)";
+            info.innerHTML = `<div class="card" style="border:2px solid ${headerColor};background:${headerBg}">
+                <div class="card-head" style="padding:10px 14px;border-bottom:1px dashed ${headerColor}">
+                    <div style="font-weight:700"><i class="fas fa-sort-amount-down-alt"></i> 发放计划 · ${result.label}
+                        ${result.ok ? '<span class="tag tag-green" style="margin-left:6px">库存充足</span>' : `<span class="tag tag-red" style="margin-left:6px">缺 ${result.shortage}${it.unit}</span>`}
+                    </div>
+                    <div style="font-size:12px;color:var(--text-muted)">共扣 ${result.plan.length} 个批次 · 实发 ${result.totalUse}${it.unit}${qty > result.totalUse ? ` / 请求 ${qty}${it.unit}` : ""}</div>
+                </div>
+                <div class="card-body" style="padding:4px 14px">
+                    <table class="data" style="font-size:13px">
+                        <thead><tr><th style="padding:8px 4px">批次</th><th style="padding:8px 4px">生产日期</th><th style="padding:8px 4px">有效期</th>
+                            <th style="padding:8px 4px">货位</th><th style="padding:8px 4px">库存</th><th style="padding:8px 4px">扣减</th><th style="padding:8px 4px">剩余</th></tr></thead>
+                        <tbody>
+                            ${result.plan.map(p => { const sup = BIZ.getSupplier(p.supplier); const st = BIZ.batchStatus(p); return `<tr>
+                                <td style="padding:8px 4px"><strong>${p.batchNo}</strong><br><span class="muted" style="font-size:11px">${sup ? sup.name.slice(0,10) : ""}</span></td>
+                                <td style="padding:8px 4px">${fmtDate(p.productionDate)}</td>
+                                <td style="padding:8px 4px">${fmtDate(p.expiryDate)} <span class="tag ${st.cls}" style="margin-left:4px">${st.label}</span></td>
+                                <td style="padding:8px 4px">${p.location || "—"}</td>
+                                <td style="padding:8px 4px">${p.use + p.left}${it.unit}</td>
+                                <td style="padding:8px 4px"><span class="fw-700 text-danger">- ${p.use}</span>${it.unit}</td>
+                                <td style="padding:8px 4px"><span class="fw-700">${p.left}</span>${it.unit}</td>
+                            </tr>`; }).join("")}
+                        </tbody>
+                    </table>
+                </div>
+            </div>`;
         },
         saveOutbound() {
             const itemId = document.getElementById("ob-item").value, qty = parseInt(document.getElementById("ob-qty").value);
             const dept = document.getElementById("ob-dept").value, operator = document.getElementById("ob-operator").value.trim();
             const purpose = document.getElementById("ob-purpose").value.trim(), patient = document.getElementById("ob-patient").value.trim() || "—";
+            const strategy = (document.querySelector('input[name="ob-strategy"]:checked') || {}).value || "FIFO";
             if (!itemId || !qty || qty < 1) return this.toast("请选择物品并填写数量", "error");
             if (!operator) return this.toast("请填写领用人", "error");
-            const fifo = BIZ.fifoBatches(itemId);
-            let remain = qty, plan = [];
-            for (const b of fifo) { if (remain <= 0) break; const use = Math.min(b.quantity, remain); plan.push({ b, use }); remain -= use; }
-            if (remain > 0) return this.toast(`库存不足，最多可发放 ${qty - remain} ${BIZ.getItem(itemId).unit}`, "error");
+            const result = BIZ.planIssue(itemId, qty, strategy);
+            if (!result.ok) return this.toast(`库存不足，最多可发放 ${result.totalUse} ${BIZ.getItem(itemId).unit}（缺 ${result.shortage}）`, "error");
             const it = BIZ.getItem(itemId);
-            plan.forEach(({ b, use }) => {
-                DB.update("batches", b.id, { quantity: b.quantity - use });
-                DB.insert("outboundRecords", { id: uid("OUT"), itemId, batchId: b.id, batchNo: b.batchNo, quantity: use, department: dept, operator, purpose: purpose || "—", patient, outboundDate: todayStr() });
+            result.plan.forEach(p => {
+                DB.update("batches", p.batchId, { quantity: p.left });
+                DB.insert("outboundRecords", { id: uid("OUT"), itemId, batchId: p.batchId, batchNo: p.batchNo, quantity: p.use, department: dept, operator, purpose: purpose || "—", patient, outboundDate: todayStr(), strategy });
             });
-            this.toast(`出库成功：${it.name} ${qty}${it.unit}，已按 FIFO 扣减并记录患者追溯`, "success");
+            this.toast(`出库成功：${it.name} ${result.totalUse}${it.unit}（${result.label}，${result.plan.length} 个批次）`, "success");
             this.closeModal(); this.updateBadges(); this.navigate("outbound");
             if (BIZ.itemStock(itemId) < it.safetyStock) {
                 const exist = DB.find("purchaseRequests", p => p.itemId === itemId && p.status === "待审批");
@@ -454,19 +499,79 @@ const App = {
             }
         },
         openTraceForm() {
-            const body = `<div class="field" style="margin-bottom:14px"><label>追溯查询（按患者姓名/住院号 或 批号）</label><input type="text" id="trace-input" placeholder="如：张建国 或 SY2025-0312B"></div>
-                <div id="trace-result">${this.empty("fa-magnifying-glass", "输入关键词查询耗材流向").replace(/<div[^>]*>/, "").replace(/<\/div>$/, "")}</div>`;
-            this.openModal("追溯查询", body, `<button class="btn" onclick="App.closeModal()">关闭</button><button class="btn btn-primary" onclick="App.runTrace()"><i class="fas fa-search"></i> 查询</button>`, "lg");
-            document.getElementById("trace-input").addEventListener("keydown", e => { if (e.key === "Enter") this.runTrace(); });
+            const depts = Array.from(new Set(DB.all("outboundRecords").map(o => o.department)));
+            const body = `
+            <div class="form-row" style="margin-bottom:12px">
+                <div class="field"><label>关键词（患者/住院号/批号/物品）</label>
+                    <input type="text" id="trace-kw" placeholder="如：张建国 / 102391 / SY2025-0312B"></div>
+                <div class="field"><label>领用科室</label>
+                    <select id="trace-dept"><option value="">全部科室</option>${depts.map(d => `<option value="${d}">${d}</option>`).join("")}</select></div>
+            </div>
+            <div class="form-row" style="margin-bottom:18px">
+                <div class="field"><label>起始日期</label><input type="date" id="trace-date-start" value="${addDays(todayStr(), -30)}"></div>
+                <div class="field"><label>结束日期</label><input type="date" id="trace-date-end" value="${todayStr()}"></div>
+            </div>
+            <div id="trace-result">${this.empty("fa-magnifying-glass", "点击「查询」按钮搜索耗材/药品完整链路").replace(/<div[^>]*>/, "").replace(/<\/div>$/, "")}</div>`;
+            this.openModal("完整链路追溯查询", body, `<button class="btn" onclick="App.closeModal()">关闭</button><button class="btn btn-primary" onclick="App.runTrace()"><i class="fas fa-search"></i> 完整链路查询</button>`, "lg");
+            document.getElementById("trace-kw").addEventListener("keydown", e => { if (e.key === "Enter") this.runTrace(); });
         },
         runTrace() {
-            const kw = document.getElementById("trace-input").value.trim().toLowerCase();
-            if (!kw) return this.toast("请输入查询关键词", "warning");
-            const results = DB.all("outboundRecords").filter(r => (r.patient && r.patient.toLowerCase().includes(kw)) || r.batchNo.toLowerCase().includes(kw));
+            const kw = document.getElementById("trace-kw").value.trim().toLowerCase();
+            const dept = document.getElementById("trace-dept").value;
+            const ds = document.getElementById("trace-date-start").value;
+            const de = document.getElementById("trace-date-end").value;
+            if (!kw && !dept && !ds && !de) return this.toast("请至少填写一项查询条件", "warning");
+            const chains = BIZ.traceChain(kw || "（全匹配）");
+            /* 应用额外筛选 */
+            const filtered = chains.filter(c => {
+                const o = c.outbound;
+                if (dept && o.department !== dept) return false;
+                if (ds && o.outboundDate < ds) return false;
+                if (de && o.outboundDate > de) return false;
+                /* 如果用户填了关键词，则用 traceChain 的内部匹配 */
+                if (kw) return true;
+                return true;
+            }).sort((a, b) => b.outbound.outboundDate.localeCompare(a.outbound.outboundDate));
             const box = document.getElementById("trace-result");
-            if (!results.length) { box.innerHTML = this.empty("fa-circle-exclamation", "未找到匹配记录").replace(/<div[^>]*>/, "").replace(/<\/div>$/, ""); return; }
-            box.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr><th>出库日期</th><th>物品</th><th>批号</th><th>数量</th><th>科室</th><th>领用人</th><th>患者</th></tr></thead>
-                <tbody>${results.map(r => { const it = BIZ.getItem(r.itemId); return `<tr><td>${fmtDate(r.outboundDate)}</td><td>${it.name}</td><td>${r.batchNo}</td><td>${r.quantity} ${it.unit}</td><td>${r.department}</td><td>${r.operator}</td><td>${r.patient}</td></tr>`; }).join("")}</tbody></table></div>`;
+            if (!filtered.length) { box.innerHTML = this.empty("fa-circle-exclamation", "未找到匹配的链路记录").replace(/<div[^>]*>/, "").replace(/<\/div>$/, ""); return; }
+            box.innerHTML = `<div class="muted" style="margin-bottom:10px">共找到 <strong>${filtered.length}</strong> 条完整链路记录：</div>
+                ${filtered.map(c => {
+                    const o = c.outbound, it = c.item, sup = c.supplier, ib = c.inbound;
+                    const total = ((ib && ib.quantity) || "-") + (it ? (it.unit ? " " + it.unit : "") : "");
+                    return `<div class="card" style="margin-bottom:12px;border-color:var(--border)">
+                        <div class="card-head" style="padding:10px 14px">
+                            <div style="font-weight:700"><i class="fas fa-box" style="color:var(--primary)"></i> ${it ? it.name : "未知物品"} <span class="muted" style="font-weight:400;font-size:12px">（${it ? it.spec : ""}）</span>
+                                <span class="tag tag-blue" style="margin-left:8px">批次 ${o.batchNo}</span>
+                                ${o.strategy ? `<span class="tag tag-gray" style="margin-left:4px">${o.strategy}</span>` : ""}
+                            </div>
+                            <span class="muted">出库 ${fmtDate(o.outboundDate)} · ${o.quantity}${it ? it.unit : ""}</span>
+                        </div>
+                        <div class="card-body" style="padding:10px 14px">
+                            <div class="timeline" style="padding-left:20px;padding-top:4px">
+                                <div class="timeline-item" style="padding-bottom:10px">
+                                    <div class="t-time">① 采购入库 ${ib ? fmtDate(ib.inboundDate) : "未知"}</div>
+                                    <div class="t-text">
+                                        <strong>供应商：</strong>${sup ? sup.name : "—"}${sup ? ` <span class="muted">(${sup.license})</span>` : ""}<br>
+                                        <strong>入库单号：</strong>${ib ? ib.receiptNo : "—"} · <strong>入库数量：</strong>${total}<br>
+                                        <strong>生产/有效期：</strong>${ib ? fmtDate(ib.productionDate) : "—"} ~ ${ib ? fmtDate(ib.expiryDate) : "—"}<br>
+                                        <strong>入库操作：</strong>${ib ? ib.operator : "—"}${ib ? (ib.checked ? ' · <span class="tag tag-green" style="margin-left:4px">已核对</span>' : '') : ''}
+                                    </div>
+                                </div>
+                                <div class="timeline-item" style="padding-bottom:0">
+                                    <div class="t-time">② 发放出库 ${fmtDate(o.outboundDate)}</div>
+                                    <div class="t-text">
+                                        <strong>领用科室：</strong><span class="tag tag-teal">${o.department}</span>
+                                        <strong style="margin-left:12px">领用人：</strong>${o.operator}
+                                        <strong style="margin-left:12px">发放数量：</strong><span class="fw-700 text-danger">${o.quantity}${it ? it.unit : ""}</span><br>
+                                        <strong>使用用途：</strong>${o.purpose || "—"}<br>
+                                        <strong>患者追溯：</strong>${o.patient && o.patient !== "—" ? `<span class="tag tag-blue"><i class="fas fa-user"></i> ${o.patient}</span>` : '<span class="muted">未关联患者</span>'}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join("")}
+            </div>`;
         },
 
         /* ---------- 效期预警 ---------- */
@@ -514,8 +619,37 @@ const App = {
         /* ---------- 采购申请 ---------- */
         purchase() {
             const list = DB.all("purchaseRequests");
+            const suggestions = BIZ.purchaseSuggestion().filter(s => s.selected);
+            const totalNeed = suggestions.reduce((sum, s) => sum + s.suggestQty, 0);
             document.getElementById("content").innerHTML = `
-            <div class="toolbar"><button class="btn btn-primary" onclick="App.openPurchaseForm()"><i class="fas fa-plus"></i> 新建采购申请</button>
+            <div class="card" style="margin-bottom:14px;border-color:#f59e0b;background:#fffbeb">
+                <div class="card-head" style="padding:10px 14px;border-bottom:1px dashed #fbbf24">
+                    <div style="font-weight:700;color:#b45309"><i class="fas fa-robot"></i> 智能待补货清单 · 根据近30天消耗自动预测 <span class="tag tag-amber" style="margin-left:6px">${suggestions.length} 种物品</span></div>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <span class="muted">合计建议采购 <strong style="color:#b45309">${totalNeed.toLocaleString()}</strong> 单位</span>
+                        <button class="btn btn-sm btn-primary" onclick="App.mergePurchaseSelected()"><i class="fas fa-layer-group"></i> 一键合并生成采购申请</button>
+                    </div>
+                </div>
+                <div class="card-body" style="padding:4px 14px">
+                    ${suggestions.length ? `<table class="data" style="font-size:13px">
+                        <thead><tr><th style="padding:8px 4px"><label style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" id="pr-all-check" checked onchange="App.toggleAllSuggestions(this)">全选</label></th>
+                            <th style="padding:8px 4px">物品</th><th style="padding:8px 4px">当前库存</th><th style="padding:8px 4px">安全库存</th><th style="padding:8px 4px">日均消耗</th>
+                            <th style="padding:8px 4px">缺口</th><th style="padding:8px 4px">已在途</th><th style="padding:8px 4px">建议采购量</th><th style="padding:8px 4px">手动调整</th></tr></thead>
+                        <tbody>${suggestions.map(s => `<tr>
+                            <td style="padding:8px 4px;text-align:center"><input type="checkbox" class="pr-item-check" data-item="${s.item.id}" checked></td>
+                            <td style="padding:8px 4px"><strong>${s.item.name}</strong><br><span class="muted" style="font-size:11px">${s.item.spec}</span></td>
+                            <td style="padding:8px 4px">${s.currentStock}<span class="text-danger">${s.currentStock < s.safetyStock ? ' ⚠' : ''}</span></td>
+                            <td style="padding:8px 4px">${s.safetyStock}${s.item.unit}</td>
+                            <td style="padding:8px 4px">${s.dailyAvg.toFixed(1)}${s.item.unit}</td>
+                            <td style="padding:8px 4px"><span class="text-danger fw-700">${s.shortage > 0 ? s.shortage : '—'}</span></td>
+                            <td style="padding:8px 4px">${s.pendingQty > 0 ? `<span class="tag tag-blue">${s.pendingQty}</span>` : '—'}</td>
+                            <td style="padding:8px 4px"><span class="fw-700">${s.suggestQty}</span>${s.item.unit}</td>
+                            <td style="padding:8px 4px;width:120px"><input type="number" min="1" value="${s.suggestQty}" class="pr-suggest-qty" data-item="${s.item.id}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px"></td>
+                        </tr>`).join("")}</tbody>
+                    </table>` : '<div class="muted" style="padding:20px;text-align:center"><i class="fas fa-check-circle" style="color:var(--success)"></i> 当前库存充足，暂无待补货物品</div>'}
+                </div>
+            </div>
+            <div class="toolbar"><button class="btn btn-primary" onclick="App.openPurchaseForm()"><i class="fas fa-plus"></i> 手动新建采购申请</button>
                 <div class="spacer"></div><span class="muted">待审批 ${list.filter(p=>p.status==="待审批").length} · 已批准 ${list.filter(p=>p.status==="已批准").length} · 已到货 ${list.filter(p=>p.status==="已到货").length}</span></div>
             <div class="card"><div class="table-wrap"><table class="data">
                 <thead><tr><th>采购单号</th><th>物品</th><th>采购数量</th><th>申请原因</th><th>申请人</th><th>申请日期</th><th>期望到货</th><th>状态</th><th>操作</th></tr></thead>
@@ -531,6 +665,41 @@ const App = {
                 }).join("") : this.emptyCell("fa-clipboard-list", "暂无采购申请", 9)}</tbody>
             </table></div></div>`;
         },
+        toggleAllSuggestions(el) {
+            document.querySelectorAll(".pr-item-check").forEach(c => { c.checked = el.checked; });
+        },
+        mergePurchaseSelected() {
+            const checked = document.querySelectorAll(".pr-item-check:checked");
+            if (!checked.length) return this.toast("请至少勾选一个物品", "warning");
+            let created = 0, merged = 0;
+            checked.forEach(cb => {
+                const itemId = cb.dataset.item;
+                const qtyInput = document.querySelector(`.pr-suggest-qty[data-item="${itemId}"]`);
+                const qty = parseInt(qtyInput.value) || 0;
+                if (qty < 1) return;
+                /* 同物品且待审批的 → 合并数量，避免重复单 */
+                const existing = DB.find("purchaseRequests", p => p.itemId === itemId && p.status === "待审批");
+                if (existing) {
+                    DB.update("purchaseRequests", existing.id, {
+                        quantity: existing.quantity + qty,
+                        reason: `${existing.reason} · 智能补货追加 +${qty}${BIZ.getItem(itemId).unit}`
+                    });
+                    merged++;
+                } else {
+                    const it = BIZ.getItem(itemId);
+                    const shortage = Math.max(0, it.safetyStock - BIZ.itemStock(itemId));
+                    DB.insert("purchaseRequests", {
+                        id: BIZ.genPurchaseNo(), itemId, quantity: qty,
+                        reason: `智能补货 · 安全库存缺口${shortage}${it.unit} + 60天预计用量，建议补${qty}${it.unit}`,
+                        status: "待审批", requestDate: todayStr(), operator: "系统智能补货",
+                        expectedDate: addDays(todayStr(), 5)
+                    });
+                    created++;
+                }
+            });
+            this.toast(`合并完成：新建 ${created} 张，合并 ${merged} 张待审批单`, "success");
+            this.updateBadges(); this.navigate("purchase");
+        },
         openPurchaseForm() {
             const items = DB.all("items");
             const body = `<div class="form-row">
@@ -538,15 +707,24 @@ const App = {
                 <div class="field"><label>采购数量 <span class="text-danger">*</span></label><input type="number" id="pr-qty" min="1" value="100"></div></div>
                 <div class="form-row form-row-1"><div class="field"><label>申请原因 <span class="text-danger">*</span></label><textarea id="pr-reason" rows="3" placeholder="说明采购原因"></textarea></div></div>
                 <div class="form-row"><div class="field"><label>期望到货日期</label><input type="date" id="pr-expected" value="${addDays(todayStr(), 5)}"></div></div>`;
-            this.openModal("新建采购申请", body, `<button class="btn" onclick="App.closeModal()">取消</button><button class="btn btn-primary" onclick="App.savePurchase()"><i class="fas fa-check"></i> 提交申请</button>`);
+            this.openModal("手动新建采购申请", body, `<button class="btn" onclick="App.closeModal()">取消</button><button class="btn btn-primary" onclick="App.savePurchase()"><i class="fas fa-check"></i> 提交申请</button>`);
         },
         savePurchase() {
             const itemId = document.getElementById("pr-item").value, qty = parseInt(document.getElementById("pr-qty").value);
             const reason = document.getElementById("pr-reason").value.trim(), expected = document.getElementById("pr-expected").value;
             if (!itemId || !qty || qty < 1 || !reason) return this.toast("请填写完整信息", "error");
-            const it = BIZ.getItem(itemId);
-            DB.insert("purchaseRequests", { id: BIZ.genPurchaseNo(), itemId, quantity: qty, reason, status: "待审批", requestDate: todayStr(), operator: "张药剂师", expectedDate: expected });
-            this.toast(`采购申请已提交：${it.name} ${qty}${it.unit}`, "success");
+            /* 若已有同物品待审批单，询问合并 */
+            const existing = DB.find("purchaseRequests", p => p.itemId === itemId && p.status === "待审批");
+            if (existing && confirm(`检测到「${BIZ.getItem(itemId).name}」已有待审批采购单 (${existing.id})，是否合并数量？\n点击确定合并，点击取消新建独立单`)) {
+                DB.update("purchaseRequests", existing.id, {
+                    quantity: existing.quantity + qty,
+                    reason: `${existing.reason} · 手动追加 +${qty}${BIZ.getItem(itemId).unit}：${reason}`
+                });
+                this.toast(`已合并至采购单 ${existing.id}，新数量 ${existing.quantity + qty}${BIZ.getItem(itemId).unit}`, "success");
+            } else {
+                DB.insert("purchaseRequests", { id: BIZ.genPurchaseNo(), itemId, quantity: qty, reason, status: "待审批", requestDate: todayStr(), operator: "张药剂师", expectedDate: expected });
+                this.toast(`采购申请已提交：${BIZ.getItem(itemId).name} ${qty}${BIZ.getItem(itemId).unit}`, "success");
+            }
             this.closeModal(); this.updateBadges(); this.navigate("purchase");
         },
         approvePurchase(id) { DB.update("purchaseRequests", id, { status: "已批准" }); this.toast("采购申请已审批通过", "success"); this.updateBadges(); this.navigate("purchase"); },

@@ -98,17 +98,28 @@ App.saveCheck = function () {
     const checks = document.querySelectorAll(".chk-item:checked");
     if (!checks.length) return this.toast("请至少选择一项物品", "warning");
     const items = [];
+    let totalDiff = 0;
     checks.forEach(chk => {
         const id = chk.dataset.id, bookQty = parseInt(chk.dataset.stock);
         const phy = document.querySelector(`.phy-qty[data-id="${id}"]`);
         const physicalQty = parseInt(phy.value);
         items.push({ itemId: id, bookQty, physicalQty, diff: physicalQty - bookQty });
+        totalDiff += physicalQty - bookQty;
     });
-    DB.insert("inventoryChecks", { id: BIZ.genCheckNo(), checkDate: todayStr(), operator: "张药剂师", status: "已完成", items });
-    items.forEach(it => {
-        if (it.diff !== 0) { const fifo = BIZ.fifoBatches(it.itemId); if (fifo.length) { const adj = Math.min(Math.abs(it.diff), fifo[0].quantity); DB.update("batches", fifo[0].id, { quantity: fifo[0].quantity + (it.diff > 0 ? adj : -adj) }); } }
+    const checkId = BIZ.genCheckNo();
+    const checkOperator = "张药剂师";
+    /* 精确校准 + 记录每个物品的处理动作 */
+    const reconciledItems = items.map(it => {
+        const r = BIZ.reconcileStock(it.itemId, it.physicalQty, { checkId, operator: checkOperator });
+        return { ...it, actions: r.actions, direction: r.direction, diff: r.diff };
     });
-    this.toast("盘点完成，差异报告已生成", "success");
+    DB.insert("inventoryChecks", {
+        id: checkId, checkDate: todayStr(), operator: checkOperator,
+        status: "已完成", items: reconciledItems, totalDiff,
+        reconciled: true
+    });
+    const adjustedCount = reconciledItems.filter(i => i.diff !== 0).length;
+    this.toast(`盘点完成：已校准 ${adjustedCount} 项，净差异 ${totalDiff > 0 ? '+' : ''}${totalDiff}`, "success");
     this.closeModal(); this.updateBadges(); this.navigate("check");
 };
 
@@ -116,6 +127,15 @@ App.showCheckDetail = function (id) {
     const c = DB.find("inventoryChecks", x => x.id === id);
     if (!c) return;
     const totalDiff = c.items.reduce((s, i) => s + i.diff, 0);
+    /* 生成每个物品的调整动作明细行 */
+    const actionRows = (actions) => {
+        if (!actions || !actions.length) return '<span class="muted">无调整</span>';
+        return actions.map(a => {
+            const sign = a.type === "盘盈加计" || a.type === "盘盈新增" ? "+" : "-";
+            const cls = a.type.startsWith("盘盈") ? "text-success" : "text-danger";
+            return `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span class="muted">批号 <strong>${a.batchNo}</strong> · ${a.type}</span><span class="fw-700 ${cls}">${sign}${a.qty}</span></div>`;
+        }).join("");
+    };
     const body = `
     <div class="detail-list" style="margin-bottom:16px">
         <div class="detail-item"><span class="lbl">盘点单号</span><span class="val">${c.id}</span></div>
@@ -123,18 +143,19 @@ App.showCheckDetail = function (id) {
         <div class="detail-item"><span class="lbl">执行人</span><span class="val">${c.operator}</span></div>
         <div class="detail-item"><span class="lbl">盘点物品数</span><span class="val">${c.items.length} 项</span></div>
         <div class="detail-item"><span class="lbl">净差异总量</span><span class="val ${totalDiff < 0 ? 'text-danger' : totalDiff > 0 ? 'text-success' : ''}">${totalDiff > 0 ? '+' : ''}${totalDiff}</span></div>
+        ${c.reconciled ? `<div class="detail-item"><span class="lbl">库存校准</span><span class="val"><span class="tag tag-green">已按实物数量精确校准</span></span></div>` : ''}
     </div>
-    <h4 style="margin:8px 0 10px;font-size:14px"><i class="fas fa-file-lines"></i> 差异明细报告</h4>
-    <div class="table-wrap"><table class="data"><thead><tr><th>物品</th><th>账面库存</th><th>实物数量</th><th>差异</th><th>差异率</th><th>处理建议</th></tr></thead>
+    <h4 style="margin:8px 0 10px;font-size:14px"><i class="fas fa-file-lines"></i> 差异明细与校准动作报告</h4>
+    <div class="table-wrap"><table class="data"><thead><tr><th>物品</th><th>账面</th><th>实物</th><th>差异</th><th>处理动作明细</th></tr></thead>
     <tbody>${c.items.map(i => {
         const it = BIZ.getItem(i.itemId);
         const rate = i.bookQty ? ((i.diff / i.bookQty) * 100).toFixed(1) : "0.0";
-        const suggest = i.diff === 0 ? '<span class="muted">账实相符</span>' : i.diff < 0 ? '<span class="tag tag-red">盘亏，需核查</span>' : '<span class="tag tag-green">盘盈，需核实</span>';
         return `<tr><td><strong>${it.name}</strong><br><span class="muted" style="font-size:11px">${it.spec}</span></td>
             <td>${i.bookQty} ${it.unit}</td><td>${i.physicalQty} ${it.unit}</td>
-            <td class="fw-700 ${i.diff < 0 ? 'text-danger' : i.diff > 0 ? 'text-success' : ''}">${i.diff > 0 ? '+' : ''}${i.diff}</td>
-            <td>${rate}%</td><td>${suggest}</td></tr>`;
-    }).join("")}</tbody></table></div>`;
+            <td class="fw-700 ${i.diff < 0 ? 'text-danger' : i.diff > 0 ? 'text-success' : ''}">${i.diff > 0 ? '+' : ''}${i.diff}（${rate}%）</td>
+            <td style="min-width:200px">${i.diff === 0 ? '<span class="muted">账实相符</span>' : actionRows(i.actions)}</td></tr>`;
+    }).join("")}</tbody></table></div>
+    ${c.reconciled ? `<p class="muted" style="margin-top:12px;font-size:12px"><i class="fas fa-info-circle"></i> 处理规则：盘亏从近效期批次依次扣减；盘盈优先加入最早入库批次，不足时新建"盘点调整"批次。所有调整已写入出库记录表，可在追溯中按批次号查找。</p>` : ''}`;
     this.openModal(`盘点差异报告 - ${c.id}`, body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "lg");
 };
 
