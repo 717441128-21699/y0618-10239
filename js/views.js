@@ -360,5 +360,135 @@ App._purchaseAdvice = function (usage) {
     </div>`).join("");
 };
 
+/* ---------- 追责看板 ---------- */
+App.views.accountability = function () {
+    const rs = BIZ.riskSummary();
+    const s = rs.summary;
+    const v = this.__acctTab || "item";
+    document.getElementById("content").innerHTML = `
+    <div class="toolbar">
+        <h3 style="margin:0"><i class="fas fa-magnifying-glass-chart"></i> 库存风险与追责看板</h3>
+        <div class="spacer"></div>
+        <span class="muted">数据截止：${todayStr()}</span>
+    </div>
+    <div class="stat-grid" style="grid-template-columns:repeat(5,1fr)">
+        <div class="kpi-card"><div class="kpi-label">总流水数</div><div class="kpi-value">${s.totalMovements}</div><div class="kpi-foot muted">条记录</div></div>
+        <div class="kpi-card"><div class="kpi-label">出库总量</div><div class="kpi-value text-info">${s.totalIssue}</div><div class="kpi-foot muted">含领用、发放</div></div>
+        <div class="kpi-card"><div class="kpi-label">报废销毁</div><div class="kpi-value text-danger">${s.totalScrap}</div><div class="kpi-foot muted">效期处理报废</div></div>
+        <div class="kpi-card"><div class="kpi-label">退回供应商</div><div class="kpi-value text-warning">${s.totalReturn}</div><div class="kpi-foot muted">效期退回</div></div>
+        <div class="kpi-card"><div class="kpi-label">盘点调整</div><div class="kpi-value text-primary">${s.totalAdj}</div><div class="kpi-foot muted">次盘亏/盘盈</div></div>
+    </div>
+    <div class="toolbar" style="margin-top:16px">
+        <div class="tab-group">
+            <button class="tab-btn ${v==='item'?'active':''}" onclick="App.switchAcctTab('item')"><i class="fas fa-pills"></i> 按物品</button>
+            <button class="tab-btn ${v==='batch'?'active':''}" onclick="App.switchAcctTab('batch')"><i class="fas fa-barcode"></i> 按批次</button>
+            <button class="tab-btn ${v==='dept'?'active':''}" onclick="App.switchAcctTab('dept')"><i class="fas fa-building"></i> 按科室</button>
+        </div>
+        <div class="spacer"></div>
+        <span class="muted">点击行查看详细流水</span>
+    </div>
+    <div class="card" style="margin-top:8px">
+        <div id="acctTabBody" style="min-height:300px">
+            ${v === 'item' ? renderAcctByItem(rs.byItem) : v === 'batch' ? renderAcctByBatch(rs.byBatch) : renderAcctByDept(rs.byDept)}
+        </div>
+    </div>`;
+};
+function renderAcctByItem(list) {
+    if (!list.length) return '<div class="muted" style="padding:30px;text-align:center">暂无数据</div>';
+    return `<table class="data-table">
+        <thead><tr><th>物品名称</th><th>规格</th><th>风险分</th><th>出库量</th><th>报废量</th><th>退货量</th><th>盘点调整</th><th>操作</th></tr></thead>
+        <tbody>${list.slice(0, 50).map(r => `<tr>
+            <td>${r.item ? r.item.name : r.itemId}</td>
+            <td class="muted">${r.item ? r.item.spec : "—"}</td>
+            <td><span class="tag ${r.riskScore>20?'tag-red':r.riskScore>10?'tag-amber':'tag-green'}">${r.riskScore}</span></td>
+            <td>${r.issueQty}</td>
+            <td class="${r.scrapQty>0?'text-danger fw-700':''}">${r.scrapQty}</td>
+            <td class="${r.returnQty>0?'text-warning fw-700':''}">${r.returnQty}</td>
+            <td>${r.adjCount} 次</td>
+            <td><button class="btn btn-sm btn-ghost" onclick="App.showAccountabilityItem('item','${r.itemId}')"><i class="fas fa-list"></i> 流水</button></td>
+        </tr>`).join("")}</tbody></table>`;
+}
+function renderAcctByBatch(list) {
+    if (!list.length) return '<div class="muted" style="padding:30px;text-align:center">暂无数据</div>';
+    return `<table class="data-table">
+        <thead><tr><th>批号</th><th>物品</th><th>流水数</th><th>动作类型</th><th>操作</th></tr></thead>
+        <tbody>${list.slice(0, 50).map(r => `<tr>
+            <td><span class="mono">${r.batchNo}</span></td>
+            <td>${r.item ? r.item.name : "—"}</td>
+            <td class="fw-700">${r.movements}</td>
+            <td>${r.typeList.map(t => `<span class="tag tag-gray" style="margin-right:3px">${t}</span>`).join("")}</td>
+            <td><button class="btn btn-sm btn-ghost" onclick="App.showAccountabilityItem('batch','${r.batchNo}')"><i class="fas fa-clock-rotate-left"></i> 时间线</button></td>
+        </tr>`).join("")}</tbody></table>`;
+}
+function renderAcctByDept(list) {
+    if (!list.length) return '<div class="muted" style="padding:30px;text-align:center">暂无数据</div>';
+    return `<table class="data-table">
+        <thead><tr><th>科室</th><th>出库量</th><th>出库单数</th><th>涉及患者</th><th>操作</th></tr></thead>
+        <tbody>${list.slice(0, 50).map(r => `<tr>
+            <td class="fw-700">${r.dept}</td>
+            <td>${r.issueQty}</td>
+            <td>${r.outboundCount}</td>
+            <td>${r.patientCount || 0} 人</td>
+            <td><button class="btn btn-sm btn-ghost" onclick="App.showAccountabilityItem('dept','${r.dept}')"><i class="fas fa-list"></i> 流水</button></td>
+        </tr>`).join("")}</tbody></table>`;
+}
+App.switchAcctTab = function (t) {
+    this.__acctTab = t;
+    this.views.accountability.call(this);
+};
+App.showAccountabilityItem = function (type, key) {
+    let list = [], title = "";
+    if (type === "item") {
+        list = BIZ.movementsByItem(key);
+        const it = BIZ.getItem(key);
+        title = `物品流水 - ${it ? it.name : key}`;
+    } else if (type === "batch") {
+        list = BIZ.movementsByBatch(key);
+        title = `批次流水 - ${key}`;
+    } else if (type === "dept") {
+        list = BIZ.movementsByDept(key);
+        title = `科室流水 - ${key}`;
+    }
+    const body = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <span class="muted">共 ${list.length} 条流水记录</span>
+        <button class="btn btn-sm btn-ghost" onclick="App.exportAccountabilityList('${type}','${key}')"><i class="fas fa-file-export"></i> 导出 CSV</button>
+    </div>
+    ${list.length ? `<div class="timeline" style="padding-left:20px;max-height:500px;overflow:auto">${list.slice(0, 100).map(m => {
+        const it = BIZ.getItem(m.itemId);
+        const dirColor = m.direction === "IN" ? "text-success" : "text-danger";
+        const sign = m.direction === "IN" ? "+" : "-";
+        const typeTag = m.movementType === '入库' ? 'tag-green' :
+                        m.movementType === '出库' ? 'tag-teal' :
+                        m.movementType === '盘点调整' ? 'tag-amber' :
+                        m.movementType === '报废销毁' ? 'tag-red' :
+                        m.movementType === '退回供应商' ? 'tag-orange' : 'tag-gray';
+        return `<div class="timeline-item" style="padding-bottom:10px">
+            <div class="t-time">${fmtDate(m.movementDate)} <span class="tag ${typeTag}" style="margin-left:6px">${m.movementType}</span></div>
+            <div class="t-text">
+                <strong>物品：</strong>${it?it.name:m.itemId} ·
+                <strong>批号：</strong><span class="mono">${m.batchNo}</span> ·
+                <strong>数量：</strong><span class="fw-700 ${dirColor}">${sign}${m.quantity}${it?it.unit:""}</span><br>
+                <strong>操作人：</strong>${m.operator} · <strong>关联：</strong>${m.refNo || "—"}
+                ${m.remark ? `<br><strong>备注：</strong>${m.remark}` : ""}
+            </div>
+        </div>`;
+    }).join("")}</div>${list.length>100?'<div class="muted" style="text-align:center;padding:8px">仅显示前 100 条，完整数据请导出 CSV</div>':''}` : '<div class="muted" style="padding:30px;text-align:center">暂无流水记录</div>'}`;
+    this.openModal(title, body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "lg");
+};
+App.exportAccountabilityList = function (type, key) {
+    let list = [], name = "";
+    if (type === "item") { list = BIZ.movementsByItem(key); name = "物品_" + key; }
+    else if (type === "batch") { list = BIZ.movementsByBatch(key); name = "批次_" + key; }
+    else if (type === "dept") { list = BIZ.movementsByDept(key); name = "科室_" + key; }
+    if (!list.length) return this.toast("暂无流水记录", "warning");
+    const csv = BIZ.movementsToCSV(list);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `追责流水_${name}_${todayStr()}.csv`;
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    this.toast(`已导出 ${list.length} 条流水记录`, "success");
+};
+
 /* ---------- 启动 ---------- */
 document.addEventListener("DOMContentLoaded", () => App.init());

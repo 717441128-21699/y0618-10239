@@ -298,7 +298,11 @@ const BIZ = {
     validBatches(itemId) {
         return DB.filter("batches", b => b.itemId === itemId && b.quantity > 0 && daysToToday(b.expiryDate) > 0);
     },
-    /* FIFO：纯先进先出 — 按入库日期升序，同日按效期升序 */
+    /* 全部有数量批次（含过期、临期）— 用于盘点校准、流水追溯 */
+    allActiveBatches(itemId) {
+        return DB.filter("batches", b => b.itemId === itemId && b.quantity > 0);
+    },
+    /* FIFO：纯先进先出 — 按入库日期升序，同日按效期升序（仅有效批次） */
     sortFIFO(itemId) {
         return this.validBatches(itemId).sort((a, b) => {
             const dd = a.inboundDate.localeCompare(b.inboundDate);
@@ -306,9 +310,25 @@ const BIZ = {
             return a.expiryDate.localeCompare(b.expiryDate);
         });
     },
-    /* FEFO：近效期优先（First Expired First Out）— 按效期升序，同日按入库日期升序 */
+    /* FIFO 全量版：包含过期批次（用于盘点盘盈归位到最早入库批次） */
+    sortFIFOAll(itemId) {
+        return this.allActiveBatches(itemId).sort((a, b) => {
+            const dd = a.inboundDate.localeCompare(b.inboundDate);
+            if (dd !== 0) return dd;
+            return a.expiryDate.localeCompare(b.expiryDate);
+        });
+    },
+    /* FEFO：近效期优先（First Expired First Out）— 按效期升序，同日按入库日期升序（仅有效批次） */
     sortFEFO(itemId) {
         return this.validBatches(itemId).sort((a, b) => {
+            const ed = a.expiryDate.localeCompare(b.expiryDate);
+            if (ed !== 0) return ed;
+            return a.inboundDate.localeCompare(b.inboundDate);
+        });
+    },
+    /* FEFO 全量版：含过期批次（用于盘点盘亏扣减，先扣过期再扣临期） */
+    sortFEFOAll(itemId) {
+        return this.allActiveBatches(itemId).sort((a, b) => {
             const ed = a.expiryDate.localeCompare(b.expiryDate);
             if (ed !== 0) return ed;
             return a.inboundDate.localeCompare(b.inboundDate);
@@ -384,7 +404,8 @@ const BIZ = {
             };
         }).filter(x => x.suggestQty > 0).sort((a, b) => b.shortage - a.shortage);
     },
-    /* 盘点校准计划：仅计算调整动作，不修改库存（待主管复核后才落库） */
+    /* 盘点校准计划：仅计算调整动作，不修改库存（待主管复核后才落库）
+       使用全量批次（含过期），盘亏按 FEFO 先扣过期/临期，盘盈加到 FIFO 头端 */
     planReconcile(itemId, physicalQty) {
         const current = this.itemStock(itemId);
         const diff = physicalQty - current;
@@ -393,7 +414,8 @@ const BIZ = {
         let remain = Math.abs(diff);
         const dir = diff > 0 ? "IN" : "OUT";
         if (dir === "OUT") {
-            const batches = this.sortFEFO(itemId);
+            /* 盘亏：按 FEFO 全量顺序扣（先过期→临期→远效期），确保总数精确对齐 */
+            const batches = this.sortFEFOAll(itemId);
             for (const b of batches) {
                 if (remain <= 0) break;
                 const use = Math.min(b.quantity, remain);
@@ -401,7 +423,8 @@ const BIZ = {
                 remain -= use;
             }
         } else {
-            const batches = this.sortFIFO(itemId);
+            /* 盘盈：加到最早入库批次（FIFO 头端），没有则新建 */
+            const batches = this.sortFIFOAll(itemId);
             if (batches.length) {
                 actions.push({ batchId: batches[0].id, batchNo: batches[0].batchNo, qty: remain, type: "盘盈增加" });
             } else {
@@ -471,6 +494,72 @@ const BIZ = {
     movementsByItem(itemId) {
         return DB.filter("stockMovements", m => m.itemId === itemId)
             .sort((a, b) => b.movementDate.localeCompare(a.movementDate));
+    },
+    /* 按科室查询流水 */
+    movementsByDept(dept) {
+        return DB.all("stockMovements").filter(m =>
+            m.refType === "outbound" &&
+            DB.find("outboundRecords", o => o.id === m.refId)?.department === dept
+        ).sort((a, b) => b.movementDate.localeCompare(a.movementDate));
+    },
+    /* 风险聚合：追责看板数据
+       维度：按物品、按批次、按科室、按处理类型
+       风险指标：临期出库量、报废量、退货量、盘点差异次数/总差异 */
+    riskSummary() {
+        const mv = DB.all("stockMovements");
+        const items = {}, batches = {}, depts = {};
+        let totalScrap = 0, totalReturn = 0, totalAdj = 0, totalIssue = 0;
+        mv.forEach(m => {
+            /* 按物品聚合 */
+            if (!items[m.itemId]) items[m.itemId] = { itemId: m.itemId, issueQty: 0, scrapQty: 0, returnQty: 0, adjCount: 0, adjDiff: 0, movementCount: 0 };
+            items[m.itemId].movementCount++;
+            if (m.movementType === "出库") { items[m.itemId].issueQty += m.quantity; totalIssue += m.quantity; }
+            if (m.movementType === "报废销毁") { items[m.itemId].scrapQty += m.quantity; totalScrap += m.quantity; }
+            if (m.movementType === "退回供应商") { items[m.itemId].returnQty += m.quantity; totalReturn += m.quantity; }
+            if (m.movementType === "盘点调整") { items[m.itemId].adjCount++; items[m.itemId].adjDiff += m.quantity; totalAdj++; }
+            /* 按批次聚合 */
+            if (!batches[m.batchNo]) batches[m.batchNo] = { batchNo: m.batchNo, itemId: m.itemId, movements: 0, types: new Set() };
+            batches[m.batchNo].movements++;
+            batches[m.batchNo].types.add(m.movementType);
+            /* 按科室聚合（仅出库类） */
+            if (m.refType === "outbound") {
+                const o = DB.find("outboundRecords", r => r.id === m.refId);
+                if (o && o.department) {
+                    if (!depts[o.department]) depts[o.department] = { dept: o.department, issueQty: 0, outboundCount: 0, patientCount: 0, patients: new Set() };
+                    depts[o.department].issueQty += m.quantity;
+                    depts[o.department].outboundCount++;
+                    if (o.patient && o.patient !== "—") {
+                        depts[o.department].patients.add(o.patient);
+                        depts[o.department].patientCount = depts[o.department].patients.size;
+                    }
+                }
+            }
+        });
+        /* 转数组，按风险排序 */
+        const itemArr = Object.values(items).map(r => { r.item = this.getItem(r.itemId); r.adjDiff = Math.abs(r.adjDiff); r.riskScore = r.scrapQty * 3 + r.returnQty * 2 + r.adjCount * 5; return r; })
+            .sort((a, b) => b.riskScore - a.riskScore);
+        const batchArr = Object.values(batches).map(r => { r.item = this.getItem(r.itemId); r.typeList = Array.from(r.types); return r; })
+            .sort((a, b) => b.movements - a.movements);
+        const deptArr = Object.values(depts).map(r => { r.patients = undefined; return r; })
+            .sort((a, b) => b.issueQty - a.issueQty);
+        return {
+            summary: { totalMovements: mv.length, totalIssue, totalScrap, totalReturn, totalAdj },
+            byItem: itemArr, byBatch: batchArr, byDept: deptArr
+        };
+    },
+    /* 流水转 CSV：用于追溯和批次时间线导出 */
+    movementsToCSV(list) {
+        const header = ["流水日期", "动作类型", "物品编码", "物品名称", "规格", "批号", "方向", "数量", "单位", "操作人", "关联单据", "关联单号", "备注"];
+        const rows = list.map(m => {
+            const it = this.getItem(m.itemId);
+            return [
+                m.movementDate, m.movementType,
+                it ? it.id : "", it ? it.name : "", it ? it.spec : "", m.batchNo,
+                m.direction === "IN" ? "入库" : "出库", m.quantity, it ? it.unit : "",
+                m.operator, m.refType || "", m.refNo || "", m.remark || ""
+            ];
+        });
+        return "\uFEFF" + [header, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\r\n");
     },
     /* 效期状态：expired / critical(30天) / warning(90天) / normal */
     batchStatus(batch) {

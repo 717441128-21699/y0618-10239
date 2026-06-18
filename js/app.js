@@ -305,9 +305,15 @@ const App = {
             if (batchNo) list = BIZ.movementsByBatch(batchNo);
             else if (itemId) list = BIZ.movementsByItem(itemId);
             else { DB.all("stockMovements").forEach(m => list.push(m)); list.sort((a, b) => b.movementDate.localeCompare(a.movementDate)); list = list.slice(0, 100); }
+            this.__mqList = list;
+            this.__mqBatchNo = batchNo;
+            this.__mqItemId = itemId;
             const box = document.getElementById("mq-result");
             if (!list.length) { box.innerHTML = this.empty("fa-circle-exclamation", "未找到流水记录").replace(/<div[^>]*>/, "").replace(/<\/div>$/, ""); return; }
-            box.innerHTML = `<div class="muted" style="margin-bottom:10px">共 ${list.length} 条流水记录${batchNo ? `（批号 ${batchNo}）` : itemId ? `（物品 ${BIZ.getItem(itemId).name}）` : '（最近 100 条）'}</div>
+            box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <span class="muted">共 ${list.length} 条流水记录${batchNo ? `（批号 ${batchNo}）` : itemId ? `（物品 ${BIZ.getItem(itemId).name}）` : '（最近 100 条）'}</span>
+                <button class="btn btn-sm btn-ghost" onclick="App.exportMovementQuery()"><i class="fas fa-file-export"></i> 导出 CSV</button>
+            </div>
             <div class="table-wrap"><table class="data" style="font-size:13px">
                 <thead><tr><th>日期</th><th>类型</th><th>物品</th><th>批号</th><th>方向</th><th>数量</th><th>操作人</th><th>关联单据</th><th>备注</th></tr></thead>
                 <tbody>${list.map(m => {
@@ -316,7 +322,9 @@ const App = {
                     const sign = m.direction === "IN" ? "+" : "-";
                     const typeTag = m.movementType === "入库" ? '<span class="tag tag-green">入库</span>' :
                                    m.movementType === "出库" ? '<span class="tag tag-teal">出库</span>' :
-                                   m.movementType === "盘点调整" ? '<span class="tag tag-amber">盘点调整</span>' : `<span class="tag tag-gray">${m.movementType}</span>`;
+                                   m.movementType === "盘点调整" ? '<span class="tag tag-amber">盘点调整</span>' :
+                                   m.movementType === "报废销毁" ? '<span class="tag tag-red">报废</span>' :
+                                   m.movementType === "退回供应商" ? '<span class="tag tag-orange">退货</span>' : `<span class="tag tag-gray">${m.movementType}</span>`;
                     return `<tr><td>${fmtDate(m.movementDate)}</td><td>${typeTag}</td>
                         <td>${it ? it.name : "—"}</td><td><strong>${m.batchNo}</strong></td>
                         <td>${m.direction === "IN" ? '<span class="text-success">↑入库</span>' : '<span class="text-danger">↓出库</span>'}</td>
@@ -324,6 +332,18 @@ const App = {
                         <td>${m.operator}</td><td>${m.refNo || "—"}</td><td style="max-width:260px">${m.remark || "—"}</td></tr>`;
                 }).join("")}</tbody>
             </table></div>`;
+        },
+        exportMovementQuery() {
+            const list = this.__mqList || [];
+            if (!list.length) return this.toast("暂无可导出的流水", "warning");
+            const csv = BIZ.movementsToCSV(list);
+            const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            const suf = this.__mqBatchNo ? "批次_" + this.__mqBatchNo : this.__mqItemId ? "物品_" + this.__mqItemId : "全部";
+            link.download = `库存流水_${suf}_${todayStr()}.csv`;
+            document.body.appendChild(link); link.click(); document.body.removeChild(link);
+            this.toast(`已导出 ${list.length} 条流水记录`, "success");
         },
 
         /* ---------- 入库管理 ---------- */
@@ -691,29 +711,48 @@ const App = {
             const list = BIZ.movementsByBatch(batchNo);
             const b = DB.find("batches", x => x.batchNo === batchNo);
             const it = b ? BIZ.getItem(b.itemId) : null;
-            const body = `<div class="detail-list" style="margin-bottom:14px">
-                ${b ? `<div class="detail-item"><span class="lbl">批号</span><span class="val">${b.batchNo}</span></div>` : ''}
-                ${it ? `<div class="detail-item"><span class="lbl">物品</span><span class="val">${it.name}（${it.spec}）</span></div>` : ''}
-                ${b ? `<div class="detail-item"><span class="lbl">当前库存</span><span class="val fw-700">${b.quantity} ${it?it.unit:""}</span></div>` : ''}
-                ${b ? `<div class="detail-item"><span class="lbl">有效期</span><span class="val">${fmtDate(b.expiryDate)}</span></div>` : ''}
+            const body = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <div class="detail-list" style="margin-bottom:0;flex:1">
+                    ${b ? `<div class="detail-item"><span class="lbl">批号</span><span class="val">${b.batchNo}</span></div>` : ''}
+                    ${it ? `<div class="detail-item"><span class="lbl">物品</span><span class="val">${it.name}（${it.spec}）</span></div>` : ''}
+                    ${b ? `<div class="detail-item"><span class="lbl">当前库存</span><span class="val fw-700">${b.quantity} ${it?it.unit:""}</span></div>` : ''}
+                    ${b ? `<div class="detail-item"><span class="lbl">有效期</span><span class="val">${fmtDate(b.expiryDate)}</span></div>` : ''}
+                </div>
+                <button class="btn btn-sm btn-ghost" onclick="App.exportBatchTimeline('${batchNo}')"><i class="fas fa-file-export"></i> 导出 CSV</button>
             </div>
             <h4 style="margin:8px 0 10px;font-size:14px"><i class="fas fa-stream"></i> 库存流水时间线（${list.length} 条）</h4>
             ${list.length ? `<div class="timeline" style="padding-left:20px">${list.map(m => {
                 const mIt = BIZ.getItem(m.itemId);
                 const dirColor = m.direction === "IN" ? "text-success" : "text-danger";
                 const sign = m.direction === "IN" ? "+" : "-";
-                const refLink = m.refType === "outbound" ? `<a href="javascript:void(0)" onclick="App.showInboundDetail('${m.refId}')" style="font-size:11px">${m.refNo}</a>` : m.refNo;
+                const typeTag = m.movementType === '入库' ? 'tag-green' :
+                                m.movementType === '出库' ? 'tag-teal' :
+                                m.movementType === '盘点调整' ? 'tag-amber' :
+                                m.movementType === '报废销毁' ? 'tag-red' :
+                                m.movementType === '退回供应商' ? 'tag-orange' : 'tag-gray';
+                const refLink = m.refType === "inbound" ? `<a href="javascript:void(0)" onclick="App.showInboundDetail('${m.refId}')" style="font-size:11px">${m.refNo}</a>` : m.refNo;
                 return `<div class="timeline-item" style="padding-bottom:12px">
-                    <div class="t-time">${fmtDate(m.movementDate)} <span class="tag ${m.movementType==='入库'?'tag-green':m.movementType==='出库'?'tag-teal':m.movementType==='盘点调整'?'tag-amber':'tag-gray'}" style="margin-left:6px">${m.movementType}</span></div>
+                    <div class="t-time">${fmtDate(m.movementDate)} <span class="tag ${typeTag}" style="margin-left:6px">${m.movementType}</span></div>
                     <div class="t-text">
                         <strong>数量：</strong><span class="fw-700 ${dirColor}">${sign}${m.quantity}${mIt?mIt.unit:""}</span> ·
                         <strong>操作人：</strong>${m.operator} ·
-                        <strong>关联单据：</strong>${refLink}<br>
+                        <strong>关联：</strong>${refLink}<br>
                         <strong>备注：</strong>${m.remark || "—"}
                     </div>
                 </div>`;
             }).join("")}</div>` : '<div class="muted" style="padding:20px;text-align:center">该批次暂无流水记录</div>'}`;
             this.openModal(`批次流水 - ${batchNo}`, body, `<button class="btn" onclick="App.closeModal()">关闭</button>`, "lg");
+        },
+        exportBatchTimeline(batchNo) {
+            const list = BIZ.movementsByBatch(batchNo);
+            if (!list.length) return this.toast("该批次暂无流水记录", "warning");
+            const csv = BIZ.movementsToCSV(list);
+            const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = `批次流水_${batchNo}_${todayStr()}.csv`;
+            document.body.appendChild(link); link.click(); document.body.removeChild(link);
+            this.toast(`已导出 ${list.length} 条流水记录`, "success");
         },
 
         /* ---------- 效期预警 ---------- */
@@ -750,11 +789,19 @@ const App = {
             const b = BIZ.getBatch(batchId);
             if (!b) return;
             const it = BIZ.getItem(b.itemId), label = action === "scrap" ? "报废销毁" : "退回供应商";
-            if (!confirm(`确认将「${it.name}（批号 ${b.batchNo}，数量 ${b.quantity}）」${label}？\n该批次将从可用库存中移除。`)) return;
+            if (!confirm(`确认将「${it.name}（批号 ${b.batchNo}，数量 ${b.quantity}）」${label}？\n该批次将从可用库存中移除，并计入库存流水。`)) return;
             const qty = b.quantity;
+            const outId = uid("OUT");
             DB.update("batches", batchId, { quantity: 0 });
-            DB.insert("outboundRecords", { id: uid("OUT"), itemId: b.itemId, batchId, batchNo: b.batchNo, quantity: qty, department: "药剂科", operator: "张药剂师", purpose: label + "（效期处理）", patient: "—", outboundDate: todayStr() });
-            this.toast(`已${label}：${it.name} ${b.batchNo}`, "success");
+            DB.insert("outboundRecords", { id: outId, itemId: b.itemId, batchId, batchNo: b.batchNo, quantity: qty, department: "药剂科", operator: "张药剂师", purpose: label + "（效期处理）", patient: "—", outboundDate: todayStr(), disposalType: action });
+            BIZ.recordMovement({
+                movementType: label, movementDate: todayStr(),
+                itemId: b.itemId, batchId, batchNo: b.batchNo, quantity: qty,
+                direction: "OUT", operator: "张药剂师",
+                refType: "outbound", refId: outId, refNo: b.batchNo,
+                remark: label + " - 效期处置，由 " + label.slice(0, 2) + "流程触发"
+            });
+            this.toast(`已${label}：${it.name} ${b.batchNo}（${qty}${it.unit}），已写入库存流水`, "success");
             this.updateBadges(); this.views.expiry.call(this);
         },
 
